@@ -262,6 +262,7 @@ Usage:
   agent-runner status                   Affiche l'avancement, le taux d'escalade et les coûts cumulés
   agent-runner retry <id>               Déplace une tâche de failed/ vers todo/ (en retirant le rapport d'erreur)
   agent-runner retry --all             Idem pour toutes les tâches de failed/
+  agent-runner merge [options]          Fusionne un lot terminé (done/) dans sa base_branch avec résumé
   agent-runner clean [--all]            Supprime logs/ (et done/ si --all est précisé)
 ```
 

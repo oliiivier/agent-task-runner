@@ -887,6 +887,28 @@ class OperationsTests(Base):
         r_last = self.runner("report", "--last", "1")
         self.assertIn("Total (1 tentative(s))", r_last.stdout)
 
+    def test_merge_batch_and_dry_run(self):
+        self.init()
+        self.add_task("01-a.md", batch="alpha", branch="feat/alpha", merge_strategy="none")
+        self.add_task("02-b.md", batch="alpha", branch="feat/alpha", merge_strategy="none")
+        self.assertEqual(self.runner("run").returncode, 0)
+        # Dry-run affiche le message de merge déterministe sans toucher aux branches
+        dry = self.runner("merge", "--batch", "alpha", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("feat/alpha -> main", dry.stdout)
+        self.assertIn("merge(batch): alpha (2 task(s))", dry.stdout)
+        self.assertIn("- 01-a: Faire 01-a.", dry.stdout)
+        self.assertIn("- 02-b: Faire 02-b.", dry.stdout)
+        # Merge réel (--no-ff par défaut) : fusionne dans main et supprime feat/alpha
+        res = self.runner("merge", "--batch", "alpha")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("feat/alpha fusionnée dans main (no-ff), branche supprimée", res.stdout)
+        self.assertEqual(self.git("branch", "--show-current").strip(), "main")
+        log_msg = self.git("log", "-1", "--pretty=%B")
+        self.assertIn("merge(batch): alpha (2 task(s))", log_msg)
+        self.assertIn("- 01-a: Faire 01-a.", log_msg)
+        self.assertEqual(self.git("branch", "--list", "feat/alpha").strip(), "")
+
 
 class MoveLinesTests(unittest.TestCase):
     def run_ml(self, *a):

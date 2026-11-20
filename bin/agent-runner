@@ -843,13 +843,101 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
     return False
 
 
+def _extract_objective(body: str) -> str:
+    """Extrait la première ligne utile sous `## Objectif` dans le corps d'une fiche."""
+    in_obj = False
+    for line in body.splitlines():
+        s = line.strip()
+        if s.lower().startswith("## objectif"):
+            in_obj = True
+            continue
+        if in_obj:
+            if s.startswith("## "):
+                break
+            if s and s != "...":
+                return s.lstrip("- ").strip()
+    return ""
+
+
+def build_merge_message(root: Path, batch: str, tasks: list[Task], branch: str, base_branch: str) -> str:
+    """Construit un message de merge déterministe et structuré à partir des fiches terminées."""
+    lines = [f"merge(batch): {batch} ({len(tasks)} task(s))", ""]
+    for t in tasks:
+        obj = _extract_objective(t.body)
+        lines.append(f"- {t.id}: {obj}" if obj else f"- {t.id}")
+    commits = git("log", "--oneline", f"{base_branch}..{branch}", cwd=root, check=False).stdout.strip()
+    if commits:
+        n_commits = len(commits.splitlines())
+        lines += ["", f"Branch: {branch} -> {base_branch} ({n_commits} commit(s))"]
+    return "\n".join(lines)
+
+
+def merge_batch_branch(
+    root: Path, tasks_dir: Path, batch: str, branch: str, base_branch: str, strategy: str,
+    message: str | None = None, delete_branch: bool = True, force: bool = False,
+) -> int:
+    """Fusionne `branch` dans `base_branch` après vérification du lot et propreté de l'arbre."""
+    if not force:
+        remaining = []
+        for folder in ("todo", "failed"):
+            for p in sorted((tasks_dir / folder).glob("*.md")):
+                try:
+                    meta, _ = parse_frontmatter(p.read_text())
+                except ValueError:
+                    continue
+                if meta.get("batch", "default") == batch:
+                    remaining.append(f"{folder}/{p.name}")
+        if remaining:
+            print(f"lot {batch} : non finalisé, tâches restantes : {', '.join(remaining)}", file=sys.stderr)
+            return 1
+    if dirty(root):
+        print(f"lot {batch} : merge impossible, arbre non propre", file=sys.stderr)
+        return 1
+    if branch == base_branch:
+        print(f"lot {batch} : branch == base_branch ({branch}), rien à fusionner.", file=sys.stderr)
+        return 1
+    if not branch_exists(root, branch):
+        print(f"lot {batch} : branche {branch!r} introuvable.", file=sys.stderr)
+        return 1
+    if not branch_exists(root, base_branch):
+        print(f"lot {batch} : base_branch {base_branch!r} introuvable.", file=sys.stderr)
+        return 1
+
+    git("checkout", base_branch, cwd=root)
+    if strategy in ("ff", "auto_ff"):
+        proc = git("merge", "--ff-only", branch, cwd=root, check=False)
+    elif strategy == "squash":
+        proc = git("merge", "--squash", branch, cwd=root, check=False)
+        if proc.returncode == 0:
+            proc = git("commit", "-m", message or f"merge(batch): {batch}", cwd=root, check=False)
+    else:  # no-ff | auto_no_ff
+        cmd = ["merge", "--no-ff"] + (["-m", message] if message else ["--no-edit"]) + [branch]
+        proc = git(*cmd, cwd=root, check=False)
+
+    if proc.returncode != 0:
+        git("merge", "--abort", cwd=root, check=False)
+        if strategy == "squash":
+            git("reset", "--hard", "HEAD", cwd=root, check=False)
+        print(f"lot {batch} : merge {strategy} de {branch} dans {base_branch} impossible "
+              f"(branche conservée) : {(proc.stderr or proc.stdout).strip()}", file=sys.stderr)
+        return 1
+
+    if delete_branch:
+        git("branch", "-D" if strategy == "squash" else "-d", branch, cwd=root)
+        print(f"lot {batch} : {branch} fusionnée dans {base_branch} ({strategy}), branche supprimée.")
+    else:
+        print(f"lot {batch} : {branch} fusionnée dans {base_branch} ({strategy}), branche conservée.")
+    return 0
+
+
 def finalize_batches(root: Path, cfg: dict, completed: list[Task]) -> int:
     tasks_dir = root / TASKS_DIR
-    last: dict[str, Task] = {}
+    by_batch: dict[str, list[Task]] = {}
     for t in completed:
-        last[t.batch] = t
+        by_batch.setdefault(t.batch, []).append(t)
     rc = 0
-    for batch, t in last.items():
+    for batch, batch_tasks in by_batch.items():
+        t = batch_tasks[-1]
         if t.merge_strategy == "none":
             continue
         remaining = []
@@ -864,25 +952,10 @@ def finalize_batches(root: Path, cfg: dict, completed: list[Task]) -> int:
         if remaining:
             print(f"lot {batch} : non finalisé, tâches restantes : {', '.join(remaining)}")
             continue
-        if dirty(root):
-            print(f"lot {batch} : merge impossible, arbre non propre", file=sys.stderr)
+        msg = build_merge_message(root, batch, batch_tasks, t.branch, t.base_branch) if t.merge_strategy == "auto_no_ff" else None
+        if merge_batch_branch(root, tasks_dir, batch, t.branch, t.base_branch, t.merge_strategy,
+                              message=msg, delete_branch=True, force=True) != 0:
             rc = 1
-            continue
-        if t.branch == t.base_branch:
-            print(f"lot {batch} : branch == base_branch ({t.branch}), rien à fusionner.", file=sys.stderr)
-            rc = 1
-            continue
-        git("checkout", t.base_branch, cwd=root)
-        flag = "--ff-only" if t.merge_strategy == "auto_ff" else "--no-ff"
-        proc = git("merge", flag, *(["--no-edit"] if flag == "--no-ff" else []), t.branch, cwd=root, check=False)
-        if proc.returncode != 0:
-            git("merge", "--abort", cwd=root, check=False)
-            print(f"lot {batch} : merge {t.merge_strategy} de {t.branch} dans {t.base_branch} impossible "
-                  f"(branche conservée) : {(proc.stderr or proc.stdout).strip()}", file=sys.stderr)
-            rc = 1
-            continue
-        git("branch", "-d", t.branch, cwd=root)
-        print(f"lot {batch} : {t.branch} fusionnée dans {t.base_branch} ({t.merge_strategy}), branche supprimée.")
     return rc
 
 
@@ -1559,6 +1632,48 @@ def cmd_retry(args) -> int:
     raise Fail(f"tâche {args.id!r} introuvable dans failed/")
 
 
+def cmd_merge(args) -> int:
+    """Fusionne un lot terminé (done/) dans sa base_branch avec message structuré."""
+    root = repo_root()
+    base = root / TASKS_DIR
+    if not base.is_dir():
+        raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    cfg = load_config(root)
+    done_tasks = [parse_task(p, cfg) for p in sorted((base / "done").glob("*.md"))]
+    if not done_tasks:
+        print("Aucune tâche terminée dans done/.")
+        return 0
+    by_batch: dict[str, list[Task]] = {}
+    for t in done_tasks:
+        by_batch.setdefault(t.batch, []).append(t)
+    batch = args.batch
+    if not batch:
+        if len(by_batch) > 1:
+            raise Fail(f"plusieurs lots dans done/ ({', '.join(sorted(by_batch))}) : préciser --batch <nom>")
+        batch = next(iter(by_batch))
+    elif batch not in by_batch:
+        raise Fail(f"lot {batch!r} introuvable dans done/ (disponibles : {', '.join(sorted(by_batch))})")
+
+    batch_tasks = by_batch[batch]
+    last = batch_tasks[-1]
+    msg = build_merge_message(root, batch, batch_tasks, last.branch, last.base_branch) if args.strategy != "ff" else None
+    if args.dry_run:
+        print(_ansi("1", f"Merge prévu pour le lot {batch!r} ({len(batch_tasks)} tâche(s)) :"))
+        print(f"  {last.branch} -> {last.base_branch} (stratégie : {args.strategy}, "
+              f"suppression branche : {'non' if args.no_delete else 'oui'})")
+        if msg:
+            print(_ansi("2", "\nMessage de commit :\n" + "\n".join(f"  {ln}" for ln in msg.splitlines())))
+        return 0
+
+    rc = merge_batch_branch(
+        root, base, batch, last.branch, last.base_branch, args.strategy,
+        message=msg, delete_branch=not args.no_delete, force=args.force,
+    )
+    if rc != 0:
+        raise Fail(f"échec du merge du lot {batch!r}")
+    return 0
+
+
 def cmd_clean(args) -> int:
     root = repo_root()
     base = root / TASKS_DIR
@@ -1603,6 +1718,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id", nargs="?")
     p.add_argument("--all", action="store_true", help="remet toutes les tâches de failed/ dans todo/")
     p.set_defaults(func=cmd_retry)
+    p = sub.add_parser("merge", help="fusionne un lot terminé (done/) dans sa base_branch")
+    p.add_argument("--batch", help="lot à fusionner (obligatoire si plusieurs lots dans done/)")
+    p.add_argument("--strategy", choices=("no-ff", "ff", "squash"), default="no-ff",
+                   help="stratégie de fusion (défaut : no-ff)")
+    p.add_argument("--no-delete", action="store_true", help="conserve la branche après fusion")
+    p.add_argument("--force", action="store_true", help="autorise la fusion même s'il reste des tâches dans todo/failed")
+    p.add_argument("--dry-run", action="store_true", help="affiche le merge et le message sans exécuter")
+    p.set_defaults(func=cmd_merge)
     p = sub.add_parser("clean", help="supprime logs/ (et done/ avec --all)")
     p.add_argument("--all", action="store_true")
     p.set_defaults(func=cmd_clean)
