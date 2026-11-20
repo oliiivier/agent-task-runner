@@ -752,6 +752,25 @@ class OperationsTests(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("on_finish_cmd en échec (code 3)", r.stderr)
 
+    def test_report_lists_attempts_and_filters(self):
+        self.init()
+        r = self.runner("report")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Aucune exécution journalisée", r.stdout)
+        self.add_task("01-a.md", batch="alpha", branch="feat/a")
+        self.add_task("02-b.md", batch="beta", branch="feat/b", max_model="sonnet")
+        self.assertEqual(self.runner("run", FAKE_FAIL_MODELS="haiku").returncode, 0)
+        r = self.runner("report")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("01-a", r.stdout)
+        self.assertIn("02-b", r.stdout)
+        self.assertIn("Total (4 tentative(s))", r.stdout)
+        r_batch = self.runner("report", "--batch", "alpha")
+        self.assertIn("01-a", r_batch.stdout)
+        self.assertNotIn("02-b", r_batch.stdout)
+        r_last = self.runner("report", "--last", "1")
+        self.assertIn("Total (1 tentative(s))", r_last.stdout)
+
 
 class MoveLinesTests(unittest.TestCase):
     def run_ml(self, *a):

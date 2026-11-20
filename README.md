@@ -25,6 +25,7 @@ agent-runner models                                    # runners disponibles (in
 agent-runner run --dry-run                              # plan + chaînes d'escalade
 agent-runner run [--batch X] [--resume] [--continue-on-error] [--model M] [--no-escalate]
 agent-runner status
+agent-runner report [--batch X] [--last N]
 agent-runner retry <id>   # ou --all
 agent-runner clean [--all]
 ```

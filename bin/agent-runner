@@ -1166,6 +1166,62 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    """Affiche le détail des tentatives journalisées dans usage.tsv."""
+    root = repo_root()
+    base = root / TASKS_DIR
+    if not base.is_dir():
+        raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    usage = base / "logs" / "usage.tsv"
+    if not usage.exists():
+        print(_ansi("2", "Aucune exécution journalisée."))
+        return 0
+    rows = [ln.split("\t") for ln in usage.read_text().splitlines()[1:] if ln.strip()]
+    if args.batch:
+        rows = [r for r in rows if r[1] == args.batch]
+    if args.last and args.last > 0:
+        rows = rows[-args.last:]
+    if not rows:
+        print(_ansi("2", f"Aucune exécution journalisée" + (f" pour le lot {args.batch!r}." if args.batch else ".")))
+        return 0
+
+    id_w = max(len("Tâche"), *(len(r[2]) for r in rows))
+    mod_w = max(len("Modèle"), *(len(f"{r[4]} {r[5]}") for r in rows))
+    header = (f"{'Tâche':<{id_w}}  {'#':>2}  {'Modèle':<{mod_w}}  {'Tours':>5}  "
+              f"{'Entrée':>9}  {'Cache W':>9}  {'Cache R':>9}  {'Sortie':>9}  {'Coût':>7}  {'Durée':>6}  Statut")
+    print(_ansi("1", header))
+    print(_ansi("2", "-" * len(header)))
+    tot_in = tot_cw = tot_cr = tot_out = tot_turns = tot_dur = 0
+    tot_cost = 0.0
+    for r in rows:
+        tin = int(r[7])
+        tcw = int(r[8])
+        tcr = int(r[9])
+        tout = int(r[10])
+        turns = int(r[6])
+        cost = float(r[11])
+        dur = int(float(r[12]))
+        st = r[13]
+        tot_in += tin
+        tot_cw += tcw
+        tot_cr += tcr
+        tot_out += tout
+        tot_turns += turns
+        tot_cost += cost
+        tot_dur += dur
+        st_color = "1;32" if st == "success" else "33" if st in ("quota", "max_turns", "timeout") else "1;31"
+        model_col = f"{r[4]} {r[5]}"
+        print(f"{r[2]:<{id_w}}  {r[3]:>2}  {model_col:<{mod_w}}  {turns:>5}  "
+              f"{_fmt_int(tin):>9}  {_fmt_int(tcw):>9}  {_fmt_int(tcr):>9}  {_fmt_int(tout):>9}  "
+              f"${cost:>6.2f}  {_fmt_dur(dur):>6}  " + _ansi(st_color, st))
+    print(_ansi("2", "-" * len(header)))
+    summary = f"Total ({len(rows)} tentative(s))"
+    print(_ansi("1", f"{summary:<{id_w + 6 + mod_w}}  {tot_turns:>5}  "
+                     f"{_fmt_int(tot_in):>9}  {_fmt_int(tot_cw):>9}  {_fmt_int(tot_cr):>9}  "
+                     f"{_fmt_int(tot_out):>9}  ${tot_cost:>6.2f}  {_fmt_dur(tot_dur):>6}"))
+    return 0
+
+
 def cmd_retry(args) -> int:
     root = repo_root()
     base = root / TASKS_DIR
@@ -1236,6 +1292,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_models)
     p = sub.add_parser("status", help="avancement, taux d'escalade et coûts")
     p.set_defaults(func=cmd_status)
+    p = sub.add_parser("report", help="détail par tentative (tokens, coût, durée, statut)")
+    p.add_argument("--batch", help="filtre sur un lot")
+    p.add_argument("--last", type=int, help="affiche les N dernières tentatives")
+    p.set_defaults(func=cmd_report)
     p = sub.add_parser("retry", help="remet une tâche (ou toutes avec --all) de failed/ dans todo/")
     p.add_argument("id", nargs="?")
     p.add_argument("--all", action="store_true", help="remet toutes les tâches de failed/ dans todo/")
