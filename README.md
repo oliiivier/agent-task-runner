@@ -23,14 +23,14 @@ agent-runner init [--gitignore] [--with-agent-rules]   # crée .agent-tasks/ (ig
 agent-runner models                                    # runners disponibles (installés + connectés) et modèles
 # générer les tâches avec le skill plan-tasks, ou copier .agent-tasks/todo/00-example.md.disabled
 agent-runner run --dry-run                              # plan + chaînes d'escalade
-agent-runner run [--batch X] [--resume] [--continue-on-error] [--model M] [--no-escalate]
+agent-runner run [--batch X] [--resume] [--continue-on-error] [--model M] [--no-escalate] [--avoid-runner R]
 agent-runner status
 agent-runner report [--batch X] [--last N]
 agent-runner retry <id>   # ou --all
 agent-runner clean [--all]
 ```
 
-Une tâche est un fichier `.agent-tasks/todo/NN-slug.md` (frontmatter YAML + corps autonome) ; voir [`templates/example-task.md`](templates/example-task.md) et [`schemas/task.schema.json`](schemas/task.schema.json). Configuration : `.agent-tasks/config.toml` (modèle : [`templates/config.toml`](templates/config.toml)).
+Une tâche est un fichier `.agent-tasks/todo/NN-slug.md` (frontmatter YAML + corps autonome) ; voir [`templates/example-task.md`](templates/example-task.md) et [`schemas/task.schema.json`](schemas/task.schema.json). Configuration : `.agent-tasks/config.toml` (modèle : [`templates/config.toml`](templates/config.toml), incluant `permission`, `strict_allowed_tools` et `on_finish_cmd`).
 
 ### Exemple de prompt pour découper un plan (Opus / session interactive)
 
@@ -68,5 +68,5 @@ Les tests utilisent des dépôts Git temporaires et un faux `claude` placé dans
 ## Limites connues
 
 - `codex` (optionnel, sans effet s'il est absent) : `codex exec --json` ; ni liste blanche d'outils ni budget, `max_turns` approché ; chaîne `[escalation].codex` à adapter aux modèles proposés. Après installation de Codex, relancer `./install.sh` pour installer la skill dans `~/.codex/skills`.
-- `agy` : ni liste blanche d'outils, ni `max_turns`, ni budget ne sont transmis (non exposés par `agy --help`) ; le format JSON de sortie étant non documenté, l'analyse des métriques est tolérante. Les alias de la chaîne `[escalation].agy` sont à adapter (`agy models`).
+- `agy` : ni liste blanche d'outils, ni `max_turns`, ni budget ne sont transmis (non exposés par `agy --help`) ; le format JSON de sortie étant non documenté, l'analyse des métriques est tolérante. En mode headless (`--print`), `permission = "bypass"` (ou des règles `permissions.allow` dans `settings.json`) est requis pour autoriser les commandes shell (`git commit`, `verify_cmd`) ; en cas de refus détecté, l'escalade est stoppée immédiatement. Les alias de la chaîne `[escalation].agy` sont à adapter (`agy models`).
 - `--with-agent-rules` écrit dans `CLAUDE.md` (créé si absent) et `AGENTS.md` s'il existe.
