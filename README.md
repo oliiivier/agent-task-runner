@@ -32,11 +32,23 @@ agent-runner clean [--all]
 
 Une tâche est un fichier `.agent-tasks/todo/NN-slug.md` (frontmatter YAML + corps autonome) ; voir [`templates/example-task.md`](templates/example-task.md) et [`schemas/task.schema.json`](schemas/task.schema.json). Configuration : `.agent-tasks/config.toml` (modèle : [`templates/config.toml`](templates/config.toml)).
 
+### Exemple de prompt pour découper un plan (Opus / session interactive)
+
+```text
+Utilise le skill plan-tasks pour découper docs/mon-plan.md en micro-tâches
+dans .agent-tasks/todo/ (ne modifie aucun fichier de code source).
+
+- Lance d'abord `agent-runner models` pour vérifier les runners disponibles.
+- Branche cible : `refactor/mon-chantier` depuis `main` (batch `mon-chantier`, merge_strategy `none`).
+- Inclus l'extrait exact du plan et les numéros de lignes dans chaque fiche pour qu'elle soit autonome.
+- Privilégie `move-lines` pour les déplacements de blocs importants et fixe un `verify_cmd` rapide ciblé sur le module modifié.
+```
+
 ## Organisation
 
 | Chemin | Rôle |
 | :--- | :--- |
-| `bin/agent-runner` | CLI (`init`, `run`, `models`, `status`, `retry`, `clean`) |
+| `bin/agent-runner` | CLI (`init`, `run`, `models`, `status`, `report`, `retry`, `clean`) |
 | `adapters/` | adaptateurs `claude` (flux `stream-json`, plafond `max_turns` appliqué par le runner) et `agy` |
 | `helpers/move-lines` | déplace une plage de lignes entre fichiers sans régénérer le code |
 | `skills/` | skill `plan-tasks`, commun à Claude Code et `agy` (même `SKILL.md`) |
