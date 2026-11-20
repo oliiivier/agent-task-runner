@@ -909,6 +909,31 @@ class OperationsTests(Base):
         self.assertIn("- 01-a: Faire 01-a.", log_msg)
         self.assertEqual(self.git("branch", "--list", "feat/alpha").strip(), "")
 
+    def test_merge_all_skips_incomplete_and_already_merged(self):
+        self.init()
+        # Lot alpha : complet
+        self.add_task("01-a.md", batch="alpha", branch="feat/alpha", merge_strategy="none")
+        # Lot beta : complet mais branche déjà fusionnée/supprimée
+        self.add_task("02-b.md", batch="beta", branch="feat/beta", merge_strategy="none")
+        # Lot gamma : 1 tâche exécutée + 1 tâche encore en todo (non terminé)
+        self.add_task("03-c.md", batch="gamma", branch="feat/gamma", merge_strategy="none")
+        self.assertEqual(self.runner("run").returncode, 0)
+        self.add_task("04-d.md", batch="gamma", branch="feat/gamma", merge_strategy="none")
+        # Fusionne beta manuellement pour simuler un lot déjà fusionné
+        self.assertEqual(self.runner("merge", "--batch", "beta").returncode, 0)
+        # Sans --all ni --batch, plusieurs lots dans done/ demandent --batch ou --all
+        err = self.runner("merge")
+        self.assertEqual(err.returncode, 1)
+        self.assertIn("--all", err.stderr)
+        # merge --all ne fusionne que alpha, et ignore beta (déjà fusionné) et gamma (incomplet)
+        res = self.runner("merge", "--all")
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("lot beta : ignoré", res.stdout)
+        self.assertIn("lot gamma : ignoré", res.stdout)
+        self.assertIn("feat/alpha fusionnée dans main", res.stdout)
+        self.assertEqual(self.git("branch", "--list", "feat/alpha").strip(), "")
+        self.assertNotEqual(self.git("branch", "--list", "feat/gamma").strip(), "")
+
 
 class MoveLinesTests(unittest.TestCase):
     def run_ml(self, *a):

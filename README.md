@@ -27,7 +27,7 @@ agent-runner run [--batch X] [--resume] [--continue-on-error] [--model M] [--no-
 agent-runner status
 agent-runner report [--batch X] [--last N]
 agent-runner retry <id>   # ou --all
-agent-runner merge [--batch X] [--strategy no-ff|ff|squash] [--no-delete] [--dry-run]
+agent-runner merge [--batch X | --all] [--strategy no-ff|ff|squash] [--no-delete] [--dry-run]
 agent-runner clean [--all]
 ```
 
