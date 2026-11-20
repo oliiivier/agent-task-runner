@@ -54,6 +54,37 @@ def nearest_effort(wanted: str, available: list[str]) -> str:
     return min(available, key=lambda e: (abs(EFFORT_LEVELS.index(e) - w), -EFFORT_LEVELS.index(e)))
 
 
+def _extract_json(text: str) -> dict | None:
+    """Objet JSON final d'une sortie pouvant contenir du bruit (infos, avertissements) avant/après.
+
+    Essaie d'abord le texte entier, puis décode un objet à partir de chaque ligne commençant par `{`
+    (le JSON peut être indenté sur plusieurs lignes). Les objets imbriqués dans un objet déjà décodé
+    sont ignorés ; on retient le dernier objet de premier niveau.
+    """
+    try:
+        whole = json.loads(text)
+        if isinstance(whole, dict):
+            return whole
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    found: dict | None = None
+    covered_until = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        start = offset + len(line) - len(line.lstrip())
+        offset += len(line)
+        if start < covered_until or not line.lstrip().startswith("{"):
+            continue
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            found, covered_until = obj, end
+    return found
+
+
 def _first(d: dict, *keys, default=0):
     for key in keys:
         if d.get(key) is not None:
@@ -119,17 +150,7 @@ class AgyAdapter(Adapter):
 
     def finalize(self, state: AttemptResult, lines: list[str], req: RunRequest) -> None:
         text = "".join(lines).strip()
-        data = None
-        # La sortie peut contenir du bruit avant/après l'objet JSON : on tente l'ensemble,
-        # puis la dernière ligne qui ressemble à un objet.
-        for candidate in [text] + [ln for ln in reversed(text.splitlines()) if ln.lstrip().startswith("{")]:
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                data = parsed
-                break
+        data = _extract_json(text)
         if data is None:
             state.result_text = text[-2000:]
             return

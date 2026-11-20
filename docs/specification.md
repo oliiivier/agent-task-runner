@@ -170,7 +170,7 @@ Extraire `RemoteSyncBanner` depuis `ReaderScreen.kt` (lignes 1420 à 1790) vers 
 * **Quota / indisponibilité :** une tentative dont l'erreur CLI correspond à une limite du fournisseur (limite d'usage, `rate limit`, `quota`, `RESOURCE_EXHAUSTED`, surcharge 429/529) est journalisée `quota`. Elle **n'entraîne pas d'escalade** chez ce fournisseur : le runner est marqué indisponible pour le reste du `run`, et la tâche bascule sur `fallback_runner` en conservant le travail partiel.
 * **Transposition des modèles :** `model`, `max_model`, `--model` et le rang atteint sont transposés vers la chaîne du runner de repli selon `[fallback_map.<destination>]` (défaut claude→agy : `haiku→gemini-3.8-flash`, `sonnet→gemini-4-argon`, `opus`/`fable→gemini-4-neon` ; agy→claude : `gemini-3.8-flash→haiku`, `hydrogen`/`argon→sonnet`, `neon→opus`), à défaut au rang relatif équivalent arrondi vers le haut.
 * **Choix au lancement :** `agent-runner run --avoid-runner claude` fait partir d'emblée sur leur `fallback_runner` les tâches dont le runner nominal est `claude` (quota presque plein) sans modifier les fiches ; un runner indisponible (cf. §4.6) est traité de la même façon.
-* **Repli automatique :** une fiche sans `fallback_runner` se replie sur l'autre runner, avec la même transposition des modèles, tant que `auto_fallback = true` (défaut de la configuration). `fallback_runner: none` interdit tout repli pour cette fiche (garde-fous propres à claude : `allowed_tools`, `max_turns`, budget) ; `auto_fallback = false` rétablit globalement « pas de champ = pas de repli ». `--dry-run` signale ces replis par `repli auto`.
+* **Repli automatique :** une fiche sans `fallback_runner` se replie sur l'autre runner, avec la même transposition des modèles, tant que `auto_fallback = true` (défaut de la configuration). `fallback_runner: none` interdit tout repli pour cette fiche (garde-fous propres à claude : `allowed_tools`, `max_turns`, budget) ; `auto_fallback = false` rétablit globalement « pas de champ = pas de repli ». `--dry-run` signale ces replis par `repli auto`. Les replis vers un runner qui n'applique pas `allowed_tools` (agy, codex) sont signalés par `[sans restriction d'outils]` ; `strict_allowed_tools = true` (défaut `false`) supprime ces replis automatiques et rejette un `fallback_runner` explicite de ce type.
 
 ### 4.5. Catalogue de modèles et effort (`agy models`)
 
@@ -259,6 +259,7 @@ Usage:
   agent-runner models [runner]          Affiche les runners disponibles, les chaînes, exclusions et le catalogue (agy models)
   agent-runner status                   Affiche l'avancement, le taux d'escalade et les coûts cumulés
   agent-runner retry <id>               Déplace une tâche de failed/ vers todo/ (en retirant le rapport d'erreur)
+  agent-runner retry --all             Idem pour toutes les tâches de failed/
   agent-runner clean [--all]            Supprime logs/ (et done/ si --all est précisé)
 ```
 
@@ -292,3 +293,11 @@ Le skill `plan-tasks` intègre directement les bonnes pratiques de réduction de
 **Alternative actuelle :** le `batch` est l'unité naturelle de parallélisme. Un parallélisme manuel reste possible sans modification de code : un worktree par lot, copie de `.agent-tasks/`, `agent-runner --batch X` avec `merge_strategy: none`, puis merge manuel.
 
 **À reconsidérer si :** plusieurs lots longs et réellement indépendants (crates/modules disjoints) deviennent fréquents, avec de la marge de quota et un besoin réel de réduire le temps d'attente. Prérequis alors : règle d'indépendance inter-lots explicite dans `plan-tasks` (lots disjoints en fichiers et sans dépendance), plutôt qu'un champ `parallelizable` par tâche.
+
+### Validations avant exécution et diagnostics (ajouts)
+
+* **Cohérence de la file** (`run`, y compris `--dry-run`) : `base_branch` doit exister (ou être créée par une tâche précédente) ; `branch != base_branch` si `merge_strategy != none` ; dans un lot comportant une fusion automatique, toutes les tâches partagent `branch`, `base_branch` et `merge_strategy`. Les cibles de `[fallback_map]` absentes de la chaîne ou du catalogue du runner de destination donnent un avertissement.
+* **Escalade :** le prompt de la tentative k+1 inclut aussi les commits déjà créés (`git log`/`git diff --stat <head_initial>..HEAD`) et la dernière sortie de l'agent (échecs C1/C2/C3).
+* **Fichiers non suivis :** les fichiers créés par une tentative et laissés non suivis (oubli de `git add`) sont signalés par un avertissement.
+* **Métriques en cas d'interruption :** `timeout` et `max_turns` envoient SIGTERM (3 s de grâce avant SIGKILL) ; sans événement `result`, les tokens sont cumulés depuis les événements `assistant` (coût inconnu, `0`).
+* **Hook de fin (`on_finish_cmd`) :** commande shell lancée depuis la racine du dépôt à la fin de chaque `run` hors `--dry-run` (succès, échec, erreur fatale ou Ctrl-C), avec `AGENT_RUNNER_STATUS` (`success` | `failure` | `error`), `AGENT_RUNNER_EXIT_CODE`, `AGENT_RUNNER_TOTAL`, `AGENT_RUNNER_DONE`, `AGENT_RUNNER_FAILED`, `AGENT_RUNNER_DONE_IDS`, `AGENT_RUNNER_FAILED_IDS`, `AGENT_RUNNER_REPO`. Délai max 60 s ; son échec n'est qu'un avertissement.

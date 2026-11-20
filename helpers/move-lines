@@ -29,6 +29,12 @@ def write_atomic(path: Path, content: str) -> str:
     return tmp
 
 
+def read_lines(path: Path) -> list[str]:
+    """Lit un fichier sans traduire les fins de ligne (Path.read_text(newline=) exige Python 3.13)."""
+    with path.open(newline="") as fh:
+        return fh.read().splitlines(keepends=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="move-lines", description=__doc__.split("\n\n")[0])
     ap.add_argument("src")
@@ -44,13 +50,13 @@ def main() -> int:
     if dst.exists() and src.resolve() == dst.resolve():
         sys.exit("move-lines: source et destination identiques")
 
-    src_lines = src.read_text(newline="").splitlines(keepends=True)
+    src_lines = read_lines(src)
     if not 1 <= args.start <= args.end <= len(src_lines):
         sys.exit(f"move-lines: plage invalide {args.start}-{args.end} (le fichier source a {len(src_lines)} lignes)")
     block = src_lines[args.start - 1 : args.end]
     remaining = src_lines[: args.start - 1] + src_lines[args.end :]
 
-    dst_lines = dst.read_text(newline="").splitlines(keepends=True) if dst.exists() else []
+    dst_lines = read_lines(dst) if dst.exists() else []
     pos = len(dst_lines) if args.after is None else args.after
     if not 0 <= pos <= len(dst_lines):
         sys.exit(f"move-lines: --after {pos} hors limites (la destination a {len(dst_lines)} lignes)")

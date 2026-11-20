@@ -14,10 +14,12 @@ class ClaudeAdapter(Adapter):
     executable = "claude"
     default_chain = ["haiku", "sonnet", "opus", "fable"]
     requires_result = True
+    supports_allowed_tools = True
 
     def __init__(self, exclude: list[str] | None = None) -> None:
         super().__init__(exclude)
         self._seen: set[str] = set()
+        self._usage: dict[str, dict] = {}  # usage cumulé par message (repli si aucun `result`)
 
     def auth_problem(self) -> str | None:
         # Une clé/jeton fourni par l'environnement suffit : pas de session à vérifier.
@@ -34,6 +36,7 @@ class ClaudeAdapter(Adapter):
 
     def build_command(self, req: RunRequest) -> list[str]:
         self._seen = set()
+        self._usage = {}
         cmd = [
             self.executable,
             "-p",
@@ -68,7 +71,14 @@ class ClaudeAdapter(Adapter):
             return False
         kind = event.get("type")
         if kind == "assistant":
-            msg_id = (event.get("message") or {}).get("id") or f"anon-{state.turns}"
+            message = event.get("message") or {}
+            msg_id = message.get("id") or f"anon-{state.turns}"
+            if isinstance(message.get("usage"), dict):
+                # Un même message revient par bloc de contenu : on garde la valeur maximale par champ.
+                acc = self._usage.setdefault(msg_id, {})
+                for key, val in message["usage"].items():
+                    if isinstance(val, int) and not isinstance(val, bool):
+                        acc[key] = max(acc.get(key, 0), val)
             if msg_id not in self._seen:
                 self._seen.add(msg_id)
                 state.turns += 1
@@ -81,6 +91,14 @@ class ClaudeAdapter(Adapter):
     def finalize(self, state: AttemptResult, lines: list[str], req: RunRequest) -> None:
         res = state.final_json
         if not res:
+            # Pas d'événement `result` (timeout, max_turns, SIGKILL) : on récupère au moins les tokens
+            # consommés d'après les événements `assistant` ; le coût en dollars reste inconnu (0).
+            def total(key: str) -> int:
+                return sum(u.get(key, 0) for u in self._usage.values())
+            state.tokens_in = total("input_tokens")
+            state.cache_write = total("cache_creation_input_tokens")
+            state.cache_read = total("cache_read_input_tokens")
+            state.tokens_out = total("output_tokens")
             return
         state.has_result = True
         usage = res.get("usage") or {}

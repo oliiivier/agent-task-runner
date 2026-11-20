@@ -37,13 +37,18 @@ if model in csv("FAKE_QUOTA_MODELS"):
     sys.exit(1)
 turns = int(os.environ.get("FAKE_TURNS", "1"))
 for i in range(turns):
-    print(json.dumps({"type": "assistant", "message": {"id": f"m{n}-{i}"}}), flush=True)
+    print(json.dumps({"type": "assistant", "message": {"id": f"m{n}-{i}",
+                      "usage": {"input_tokens": 4, "output_tokens": 2}}}), flush=True)
+    if os.environ.get("FAKE_SLOW"):
+        import time; time.sleep(0.2)
 if model in csv("FAKE_FAIL_MODELS"):
     pass  # ne produit rien : pas de commit
 else:
     open(f"work-{n}.txt", "w").write(model)
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "commit", "-q", "-m", f"feat: work {n} by {model}"], check=True)
+if model in csv("FAKE_UNTRACKED_MODELS"):
+    open("stray.txt", "w").write("x")
 if model in csv("FAKE_DIRTY_MODELS"):
     open("README.md", "a").write("dirty\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": turns,
@@ -573,6 +578,164 @@ class FrontmatterTests(unittest.TestCase):
         self.assertTrue(body.startswith("## Objectif"))
         with self.assertRaises(ValueError):
             mod.parse_frontmatter("pas de frontmatter")
+
+
+def load_runner_module():
+    loader = SourceFileLoader("agent_runner", str(RUNNER))
+    spec = importlib.util.spec_from_loader("agent_runner", loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["agent_runner"] = mod
+    loader.exec_module(mod)
+    return mod
+
+
+class ParsingRobustnessTests(unittest.TestCase):
+    def test_numeric_id_and_trailing_comments(self):
+        mod = load_runner_module()
+        meta, _ = mod.parse_frontmatter(textwrap.dedent('''\
+            ---
+            id: 01
+            batch: 7
+            max_turns: 30 # garde-fou
+            verify_cmd: "echo '#' # fin"
+            model: haiku   # le moins cher
+            effort:  # vide
+            allowed_tools: ["Bash(git:*)", "x #y"]  # liste
+            ---
+            corps
+            '''))
+        self.assertEqual(meta["id"], "01")
+        self.assertEqual(meta["batch"], 7)
+        self.assertEqual(meta["max_turns"], 30)
+        self.assertEqual(meta["verify_cmd"], "echo '#' # fin")
+        self.assertEqual(meta["model"], "haiku")
+        self.assertIsNone(meta["effort"])
+        self.assertEqual(meta["allowed_tools"], ["Bash(git:*)", "x #y"])
+
+    def test_agy_extracts_multiline_json_after_noise(self):
+        sys.path.insert(0, str(RUNNER.parent.parent))
+        from adapters.agy import _extract_json
+        out = 'Info: loading\n{"note": "bruit"}\nwarning\n' + json.dumps(
+            {"result": "ok", "usage": {"input_tokens": 3}}, indent=2) + "\ntrailing"
+        self.assertEqual(_extract_json(out)["usage"], {"input_tokens": 3})
+        self.assertIsNone(_extract_json("pas de json"))
+
+
+class ImprovementTests(Base):
+    def test_status_with_header_only_usage(self):
+        self.init()
+        (self.repo / ".agent-tasks/logs").mkdir(exist_ok=True)
+        (self.repo / ".agent-tasks/logs/usage.tsv").write_text("timestamp\tbatch\tid\n")
+        r = self.runner("status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_dry_run_unknown_agy_model_is_clean_error(self):
+        self.init()
+        self.add_task("01-a.md", runner="agy", model="gemini-inconnu")
+        r = self.runner("run", "--dry-run")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_batch_validation(self):
+        self.init()
+        self.add_task("01-a.md", batch="b", branch="feat/b", merge_strategy="auto_no_ff")
+        self.add_task("02-b.md", batch="b", branch="feat/b")  # merge_strategy omis : incohérent
+        r = self.runner("run", "--dry-run")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("merge_strategy", r.stderr)
+        self.assertIn("lot 'b'", r.stderr)
+
+    def test_branch_equal_base_with_merge_rejected(self):
+        self.init()
+        self.add_task("01-a.md", branch="main", merge_strategy="auto_ff")
+        r = self.runner("run", "--dry-run")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("branch == base_branch", r.stderr)
+
+    def test_missing_base_branch_rejected(self):
+        self.init()
+        self.add_task("01-a.md", base_branch="nope")
+        r = self.runner("run", "--dry-run")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("base_branch 'nope' introuvable", r.stderr)
+
+    def test_escalation_prompt_lists_previous_commits(self):
+        self.init()
+        self.add_task("01-a.md")
+        self.runner("run", FAKE_DIRTY_MODELS="haiku")
+        prompts = [c["prompt"] for c in self.calls()]
+        self.assertGreaterEqual(len(prompts), 2)
+        self.assertIn("Commits déjà créés", prompts[1])
+        self.assertIn("feat: work 1 by haiku", prompts[1])
+        self.assertIn("Dernière sortie de l'agent", prompts[1])
+
+    def test_untracked_files_warning(self):
+        self.init()
+        self.add_task("01-a.md")
+        r = self.runner("run", FAKE_UNTRACKED_MODELS="haiku")
+        self.assertIn("fichiers non suivis", r.stderr)
+        self.assertIn("stray.txt", r.stderr)
+
+    def test_max_turns_keeps_tokens(self):
+        self.init()
+        self.add_task("01-a.md", max_turns=1, escalate=False, fallback_runner="none")
+        self.runner("run", FAKE_TURNS="6", FAKE_SLOW="1")
+        row = self.usage_rows()[0]
+        self.assertEqual(row[13], "max_turns")
+        self.assertGreater(int(row[7]), 0)  # tokens_in récupérés des événements assistant
+
+    def test_allowed_tools_fallback_flag_and_strict(self):
+        self.init()
+        self.add_task("01-a.md")
+        r = self.runner("run", "--dry-run")
+        self.assertIn("sans restriction d'outils", r.stdout)
+        cfg = self.repo / ".agent-tasks/config.toml"
+        cfg.write_text("strict_allowed_tools = true\n" + cfg.read_text())
+        r = self.runner("run", "--dry-run")
+        self.assertNotIn("sans restriction d'outils", r.stdout)
+        self.assertNotIn("repli", r.stdout)
+
+
+class OperationsTests(Base):
+    def test_retry_all(self):
+        self.init()
+        self.add_task("01-a.md", branch="feat/a", escalate=False)
+        self.add_task("02-b.md", branch="feat/b", escalate=False)
+        self.runner("run", "--continue-on-error", FAKE_FAIL_MODELS="haiku")
+        self.assertEqual(self.listing("failed"), ["01-a.md", "02-b.md"])
+        r = self.runner("retry", "--all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.listing("failed"), [])
+        self.assertEqual(self.listing("todo"), ["01-a.md", "02-b.md"])
+        self.assertNotIn("Rapport d'échec", (self.repo / ".agent-tasks/todo/01-a.md").read_text())
+        self.assertIn("Aucune tâche", self.runner("retry", "--all").stdout)
+        self.assertEqual(self.runner("retry").returncode, 1)
+        self.assertEqual(self.runner("retry", "01-a", "--all").returncode, 1)
+
+    def test_on_finish_cmd(self):
+        self.init()
+        out = self.repo.parent / "hook.txt"
+        cfg = self.repo / ".agent-tasks/config.toml"
+        cmd = f'echo "$AGENT_RUNNER_STATUS $AGENT_RUNNER_EXIT_CODE $AGENT_RUNNER_DONE/$AGENT_RUNNER_TOTAL ' \
+              f'[$AGENT_RUNNER_FAILED_IDS]" >> {out}'
+        cfg.write_text(f"on_finish_cmd = {json.dumps(cmd)}\n" + cfg.read_text())
+        self.add_task("01-a.md", branch="feat/a")
+        self.add_task("02-b.md", branch="feat/b", escalate=False)
+        r = self.runner("run", "--continue-on-error", FAKE_FAIL_MODELS="haiku")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(out.read_text(), "failure 1 1/2 [02-b]\n")
+        self.runner("run", "--dry-run")  # pas de hook en dry-run
+        self.assertEqual(len(out.read_text().splitlines()), 1)
+
+    def test_on_finish_cmd_failure_is_only_a_warning(self):
+        self.init()
+        cfg = self.repo / ".agent-tasks/config.toml"
+        cfg.write_text('on_finish_cmd = "exit 3"\n' + cfg.read_text())
+        self.add_task("01-a.md")
+        r = self.runner("run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("on_finish_cmd en échec (code 3)", r.stderr)
 
 
 class MoveLinesTests(unittest.TestCase):

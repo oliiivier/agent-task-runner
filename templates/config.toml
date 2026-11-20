@@ -2,28 +2,44 @@
 # Une configuration globale optionnelle peut vivre dans ~/.config/agent-task-runner/config.toml.
 main_branch = "main"
 default_runner = "claude"   # choisi par `agent-runner init` parmi les runners installés et connectés
-# runners = ["claude", "agy"]   # runners autorisés (défaut : tous) ; les autres sont traités comme indisponibles
+# runners = ["claude", "agy", "codex"]   # runners autorisés (défaut : tous) ; les autres sont traités comme indisponibles
 auto_fallback = true   # fiche sans fallback_runner : repli sur l'autre runner (`fallback_runner: none` l'interdit)
 default_verify_cmd = ""
-default_allowed_tools = [
-  "Bash(git:*)", "Bash(move-lines:*)", "Bash(ls:*)", "Bash(grep:*)",
-  "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)",
-]
+default_allowed_tools = ["Bash(git:*)", "Bash(move-lines:*)", "Bash(ls:*)", "Bash(grep:*)", "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)"]
 default_max_turns = 35
 default_timeout_sec = 900
 permission = "accept"   # "accept" (acceptEdits) ou "bypass" (--dangerously-skip-permissions)
+strict_allowed_tools = false   # true : pas de repli auto vers un runner qui ignore allowed_tools (agy, codex)
+# on_finish_cmd = 'notify-send agent-runner "$AGENT_RUNNER_STATUS : $AGENT_RUNNER_DONE/$AGENT_RUNNER_TOTAL"'
+#   lancé en fin de `run` ; variables AGENT_RUNNER_{STATUS,EXIT_CODE,TOTAL,DONE,FAILED,DONE_IDS,FAILED_IDS,REPO}
 
 # Chaînes d'escalade, du modèle le moins cher au plus puissant.
+# agy : familles sans suffixe d'effort ; le runner compose `<famille>-<effort>` d'après `agy models`
+# (`agent-runner models` affiche le catalogue disponible).
 [escalation]
 claude = ["haiku", "sonnet", "opus", "fable"]
-agy    = [
-  "gemini-3.8-flash-medium",
-  "gemini-4-hydrogen-medium",
-  "gemini-4-argon-high",
-  "gemini-4-neon-high"
-]   # à adapter aux alias exacts (`agy models`)
+agy = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon", "gemini-4-neon"]
+codex = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
+
+# Modèles à ne jamais utiliser via un CLI (motifs fnmatch).
+[exclude_models]
+agy = ["claude-*"]
+
+# Équivalences lors d'une bascule vers le runner de repli (table = runner de destination).
+[fallback_map.agy]
+"haiku" = "gemini-3.8-flash"
+"sonnet" = "gemini-4-argon"
+"opus" = "gemini-4-neon"
+"fable" = "gemini-4-neon"
+
+[fallback_map.claude]
+"gemini-3.8-flash" = "haiku"
+"gemini-4-hydrogen" = "sonnet"
+"gemini-4-argon" = "sonnet"
+"gemini-4-neon" = "opus"
 
 # Arguments CLI supplémentaires par runner.
 [extra_args]
 # claude = []
 # agy = []
+# codex = []

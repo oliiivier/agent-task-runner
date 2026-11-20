@@ -60,6 +60,9 @@ QUOTA_RE = re.compile(
 )
 
 
+TERM_GRACE_SEC = 3  # délai laissé au CLI pour écrire son résumé final après SIGTERM, avant SIGKILL
+
+
 class Adapter:
     """Classe de base : lance le CLI, journalise le flux, applique timeout et max_turns."""
 
@@ -67,6 +70,7 @@ class Adapter:
     executable = ""
     default_chain: list[str] = []
     requires_result = True  # C1 exige un événement/objet de résultat final
+    supports_allowed_tools = False  # le CLI applique-t-il `allowed_tools` (liste blanche d'outils) ?
     exclude: list[str] = []  # motifs fnmatch de modèles à ne jamais utiliser via ce CLI
 
     def __init__(self, exclude: list[str] | None = None) -> None:
@@ -126,15 +130,25 @@ class Adapter:
             log_path.write_text(state.error + "\n")
             return state
 
-        def kill() -> None:
+        def kill(sig: int = signal.SIGKILL) -> None:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                os.killpg(proc.pid, sig)
             except (ProcessLookupError, PermissionError):
                 pass
 
+        graceful: list[threading.Timer] = []
+
+        def stop() -> None:
+            """SIGTERM puis SIGKILL après un court délai : le CLI peut ainsi émettre son résultat (tokens, coût)."""
+            kill(signal.SIGTERM)
+            hard = threading.Timer(TERM_GRACE_SEC, kill)
+            hard.daemon = True
+            graceful.append(hard)
+            hard.start()
+
         def on_timeout() -> None:
             state.timed_out = True
-            kill()
+            stop()
 
         timer = threading.Timer(req.timeout_sec, on_timeout)
         timer.daemon = True
@@ -148,10 +162,12 @@ class Adapter:
                     lines.append(line)
                     if self.on_line(line, state, req) and not state.max_turns_hit:
                         state.max_turns_hit = True
-                        kill()
+                        stop()
             proc.wait()
         finally:
             timer.cancel()
+            for t in graceful:
+                t.cancel()
             kill()  # ne laisse aucun processus orphelin (également sur Ctrl-C)
             proc.wait()
 
