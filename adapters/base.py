@@ -37,6 +37,7 @@ class AttemptResult:
     timed_out: bool = False
     max_turns_hit: bool = False
     quota_hit: bool = False  # quota/limite d'usage/surcharge du fournisseur (pas un échec du modèle)
+    permission_denied: bool = False  # commande refusée en mode headless (configuration, pas échec du modèle)
     is_error: bool = False
     has_result: bool = False
     turns: int = 0

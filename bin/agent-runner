@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -531,7 +532,7 @@ def evaluate(task: Task, root: Path, res, head_before: str, log_base: Path) -> t
     return "success", "", ""
 
 
-def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool) -> bool:
+def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, progress: str = "") -> bool:
     tasks_dir = root / TASKS_DIR
     logs = tasks_dir / "logs"
     logs.mkdir(exist_ok=True)
@@ -558,14 +559,15 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool) -> 
     attempts: list[dict] = []
     prev: dict | None = None
     note = f" (repli de {task.runner})" if runner != task.runner else ""
-    print(f"=== {task.id} [{task.batch}] branche {task.branch} — {runner}{note} : {' -> '.join(queue)}")
+    print(_ansi("1", f"=== {progress}{task.id}") + _ansi("2", f" [{task.batch}] branche {task.branch}")
+          + f" — {_ansi('32', runner)}{note} : {' -> '.join(queue)}")
 
     k = 0
     while queue:
         model = queue.pop(0)
         k += 1
         if prev and prev["status"] != "quota":
-            print(f"    escalade {prev['model']} -> {model}")
+            print(_ansi("36", f"    escalade {prev['model']} -> {model}"))
         adapter = adapter_for(runner, cfg)
         try:
             model_id = adapter.resolve_model(model, task.effort, args.catalogs.get(runner))
@@ -581,19 +583,19 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool) -> 
             extra_args=list(cfg.get("extra_args", {}).get(runner, [])),
         )
         shown = model_id if model_id != model else model + (f" (effort {task.effort})" if task.effort else "")
-        print(f"    tentative {k} : {runner} {shown}"
-              + " ...", flush=True)
+        print(f"    tentative {k} : {_ansi('1', f'{runner} {shown}')} ...", flush=True)
         untracked_before = untracked(root)
         res = adapter.run(req, Path(f"{log_base}.log"), Path(f"{log_base}.json"))
         status, reason, verify_tail = evaluate(task, root, res, head_before, log_base)
         new_files = sorted(untracked(root) - untracked_before)
         if new_files:
             shown_files = ", ".join(new_files[:10]) + (f" (+{len(new_files) - 10})" if len(new_files) > 10 else "")
-            print(f"    ! fichiers non suivis laissés par l'agent (oubli de `git add` ?) : {shown_files}",
-                  file=sys.stderr)
+            print(_ansi("33", f"    ! fichiers non suivis laissés par l'agent (oubli de `git add` ?) : {shown_files}",
+                        sys.stderr), file=sys.stderr)
         log_usage(logs, task, k, runner, model_id, res, status)
-        print(f"    -> {status}" + (f" : {reason}" if reason else "")
-              + f"  (tours={res.turns}, coût=${res.cost_usd:.2f}, {res.duration_sec:.0f}s)")
+        st_color = "1;32" if status == "success" else "33" if status in ("quota", "max_turns", "timeout") else "1;31"
+        metrics = f"(tours={res.turns}, coût=${res.cost_usd:.2f}, {_fmt_dur(res.duration_sec)})"
+        print(f"    -> {_ansi(st_color, status)}" + (f" : {reason}" if reason else "") + "  " + _ansi("2", metrics))
         attempts.append({"k": k, "model": f"{runner} {model_id}", "status": status, "reason": reason})
         if status == "success":
             shutil.move(str(task.path), str(tasks_dir / "done" / task.path.name))
@@ -603,25 +605,31 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool) -> 
             agent_tail = tail(res.result_text.strip() or read_tail(Path(f"{log_base}.log")), 1500)
         prev = {"model": f"{runner} {model_id}", "status": status, "reason": reason,
                 "verify_tail": verify_tail, "agent_tail": agent_tail}
+        if res.permission_denied:
+            print(_ansi("1;31", f"    ! {runner} a refusé une commande en mode headless : passer "
+                        '`permission = "bypass"` dans config.toml ou configurer permissions.allow dans settings.json.',
+                        sys.stderr), file=sys.stderr)
+            break
         if status == "quota":
             # Le fournisseur est saturé : inutile d'escalader chez lui. On bascule sur le repli en
             # reprenant au rang équivalent, et on le marque indisponible pour les tâches suivantes.
             unavailable.add(runner)
             alt = task.fallback_runner if task.fallback_runner not in unavailable else None
             if alt is None or runner == alt:
-                print(f"    quota {runner} atteint, aucun runner de repli disponible.", file=sys.stderr)
+                print(_ansi("1;31", f"    quota {runner} atteint, aucun runner de repli disponible.", sys.stderr),
+                      file=sys.stderr)
                 break
             src = cfg["escalation"].get(runner) or []
             dst = cfg["escalation"].get(alt) or []
             start = map_model(model, src, dst, cfg.get("fallback_map", {}).get(alt))
             queue = candidate_models(task, cfg, args.model, args.no_escalate, alt, start=start)
-            print(f"    bascule {runner} -> {alt} : {' -> '.join(queue)}")
+            print(_ansi("33", f"    bascule {runner} -> {alt} : {' -> '.join(queue)}"))
             runner = alt
 
     # Échec définitif
     if not args.continue_on_error:
-        print(f"    ÉCHEC de {task.id} : tâche laissée dans todo/ avec l'état partiel (--resume pour reprendre).",
-              file=sys.stderr)
+        print(_ansi("1;31", f"    ÉCHEC de {task.id} : tâche laissée dans todo/ avec l'état partiel (--resume pour reprendre).",
+                    sys.stderr), file=sys.stderr)
         return False
     git("reset", "--hard", head_before, cwd=root)
     git("clean", "-fd", "-e", TASKS_DIR, cwd=root)
@@ -633,7 +641,8 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool) -> 
     with task.path.open("a") as fh:
         fh.write("\n".join(report) + "\n")
     shutil.move(str(task.path), str(tasks_dir / "failed" / task.path.name))
-    print(f"    ÉCHEC de {task.id} : arbre réinitialisé, tâche déplacée vers failed/.", file=sys.stderr)
+    print(_ansi("1;31", f"    ÉCHEC de {task.id} : arbre réinitialisé, tâche déplacée vers failed/.", sys.stderr),
+          file=sys.stderr)
     return False
 
 
@@ -747,23 +756,83 @@ def cmd_models(args) -> int:
     for runner in runners:
         adapter = adapter_for(runner, cfg)
         chain = cfg["escalation"].get(runner) or []
-        print(f"[{runner}] chaîne : {' -> '.join(chain) or '-'}")
+        print(_ansi("1;36", f"[{runner}]") + f" chaîne : {' -> '.join(chain) or '-'}")
         if adapter.exclude:
-            print(f"  exclus : {', '.join(adapter.exclude)}")
+            print(_ansi("2", f"  exclus : {', '.join(adapter.exclude)}"))
         if status[runner]:
-            print(f"  indisponible : {status[runner]}")
+            print(_ansi("33", f"  indisponible : {status[runner]}"))
             continue
         catalog = catalogs.get(runner)
         if catalog is None:
-            print("  (pas de catalogue exposé par le CLI : alias de la chaîne utilisés tels quels)")
+            print(_ansi("2", "  (pas de catalogue exposé par le CLI : alias de la chaîne utilisés tels quels)"))
             continue
         for family, efforts in catalog.items():
-            mark = "*" if family in chain else " "
-            print(f"  {mark} {family:<34} {', '.join(efforts) or '(sans effort)'}")
+            mark = _ansi("32", "*") if family in chain else " "
+            print(f"  {mark} {family:<34} {_ansi('2', ', '.join(efforts) or '(sans effort)')}")
         for m in chain:
             if not in_catalog(m, catalog):
-                print(f"  ! {m} : absent du catalogue")
+                print(_ansi("1;31", f"  ! {m} : absent du catalogue"))
     return 0
+
+
+def _ansi(code: str, text: str, stream=None) -> str:
+    """Applique un style ANSI uniquement sur un terminal interactif (et sans NO_COLOR)."""
+    target = stream or sys.stdout
+    if target.isatty() and not os.environ.get("NO_COLOR"):
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def _fmt_int(n: int | float) -> str:
+    return f"{int(n):,}".replace(",", " ")
+
+
+def _fmt_dur(sec: float) -> str:
+    s = int(sec)
+    return f"{s}s" if s < 60 else f"{s // 60}m{s % 60:02d}s"
+
+
+def print_dry_run(tasks: list[Task], cfg: dict, args, status: dict[str, str | None], avoid: set[str]) -> None:
+    """Affiche le plan d'exécution (--dry-run) regroupé par lot/branche, avec alignement et couleurs TTY."""
+    print(_ansi("1", f"Plan d'exécution : {len(tasks)} tâche(s)"))
+    name_w = min(max(len(t.path.name) for t in tasks), 36)
+    last_group: tuple[str, str, str, str] | None = None
+    for t in tasks:
+        runner = pick_runner(t, args.unavailable, avoid)
+        adapter = adapter_for(runner, cfg)
+        try:
+            chain = [adapter.resolve_model(m, t.effort, args.catalogs.get(runner))
+                     for m in candidate_models(t, cfg, args.model, args.no_escalate, runner)]
+        except ValueError as exc:
+            raise Fail(f"{t.id} : {exc}") from exc
+        group = (t.batch, t.branch, t.base_branch, t.merge_strategy)
+        if group != last_group:
+            last_group = group
+            print()
+            print(_ansi("1;36", f"[{t.batch}]") + f"  branche {_ansi('1', t.branch)} <- {t.base_branch}  "
+                  + _ansi("2", f"(merge: {t.merge_strategy})"))
+        notes: list[str] = []
+        if t.fallback_runner and t.fallback_runner != runner:
+            notes.append(_ansi("2", f"(repli {'auto ' if t.fallback_auto else ''}{t.fallback_runner})"))
+        elif runner != t.runner:
+            notes.append(_ansi("2", f"(au lieu de {t.runner}{', repli auto' if t.fallback_auto else ''})"))
+        if runner in args.unavailable:
+            notes.append(_ansi("1;31", f"[INDISPONIBLE : {status[runner]}]"))
+        if t.allowed_tools:
+            if not adapter.supports_allowed_tools:
+                notes.append(_ansi("33", "[sans restriction d'outils]"))
+            elif t.fallback_runner and not adapter_for(t.fallback_runner, cfg).supports_allowed_tools:
+                notes.append(_ansi("33", f"[repli {t.fallback_runner} : sans restriction d'outils]"))
+        suffix = ("  " + " ".join(notes)) if notes else ""
+        print(f"  {t.path.name:<{name_w}}  {_ansi('32', f'{runner:<6}')}  {' -> '.join(chain)}{suffix}")
+        meta = []
+        if t.effort:
+            meta.append(f"effort={t.effort}")
+        meta.append(f"max_turns={t.max_turns}")
+        if t.timeout_sec != cfg["default_timeout_sec"]:
+            meta.append(f"timeout={t.timeout_sec}s")
+        meta.append(f"verify: {t.verify_cmd or '-'}")
+        print(_ansi("2", "    " + "  ".join(meta)))
 
 
 def cmd_run(args) -> int:
@@ -792,30 +861,14 @@ def cmd_run(args) -> int:
     apply_strict_allowed_tools(cfg, tasks)
     validate_queue(root, cfg, tasks)
     check_fallback_map(cfg, tasks, args.catalogs)
+    if cfg.get("permission") != "bypass" and any(
+        pick_runner(t, args.unavailable, avoid) == "agy" and t.require_commit for t in tasks
+    ):
+        print(_ansi("33", 'avertissement : agy avec permission = "accept" bloque les commandes shell '
+                    '(git commit) sans règles permissions.allow dans settings.json ; utiliser '
+                    'permission = "bypass" si besoin.', sys.stderr), file=sys.stderr)
     if args.dry_run:
-        for t in tasks:
-            runner = pick_runner(t, args.unavailable, avoid)
-            adapter = adapter_for(runner, cfg)
-            try:
-                chain = [adapter.resolve_model(m, t.effort, args.catalogs.get(runner))
-                         for m in candidate_models(t, cfg, args.model, args.no_escalate, runner)]
-            except ValueError as exc:
-                raise Fail(f"{t.id} : {exc}") from exc
-            fb = ""
-            if t.fallback_runner and t.fallback_runner != runner:
-                fb = f" (repli {'auto ' if t.fallback_auto else ''}{t.fallback_runner})"
-            elif runner != t.runner:
-                fb = f" (au lieu de {t.runner}{', repli auto' if t.fallback_auto else ''})"
-            if runner in args.unavailable:
-                fb += f" [INDISPONIBLE : {status[runner]}]"
-            if t.allowed_tools:
-                if not adapter.supports_allowed_tools:
-                    fb += " [sans restriction d'outils]"
-                elif t.fallback_runner and not adapter_for(t.fallback_runner, cfg).supports_allowed_tools:
-                    fb += f" [repli {t.fallback_runner} : sans restriction d'outils]"
-            print(f"{t.path.name}: [{t.batch}] {runner} {' -> '.join(chain)}{fb} | effort={t.effort or '-'} "
-                  f"| branche {t.branch} (base {t.base_branch}) | merge={t.merge_strategy} "
-                  f"| max_turns={t.max_turns} | verify={t.verify_cmd or '-'}")
+        print_dry_run(tasks, cfg, args, status, avoid)
         return 0
     if git("check-ignore", "-q", TASKS_DIR, cwd=root, check=False).returncode != 0:
         raise Fail(".agent-tasks n'est pas ignoré par Git : relancer `agent-runner init`")
@@ -828,9 +881,12 @@ def cmd_run(args) -> int:
     completed: list[Task] = []
     failed: list[Task] = []
     rc: int | None = None
+    t0 = time.monotonic()
     try:
+        total = len(tasks)
         for i, task in enumerate(tasks):
-            if execute_task(root, cfg, task, args, allow_dirty=args.resume and i == 0):
+            if execute_task(root, cfg, task, args, allow_dirty=args.resume and i == 0,
+                            progress=f"[{i + 1}/{total}] "):
                 completed.append(task)
             else:
                 failed.append(task)
@@ -841,6 +897,12 @@ def cmd_run(args) -> int:
         rc = 1 if failed else rc
         return rc
     finally:  # également sur erreur fatale ou Ctrl-C (rc reste None)
+        if completed or failed:
+            parts = [_ansi("1;32", f"{len(completed)}/{len(tasks)} réussie(s)")]
+            if failed:
+                parts.append(_ansi("1;31", f"{len(failed)} en échec"))
+            parts.append(_ansi("2", _fmt_dur(time.monotonic() - t0)))
+            print("\n" + _ansi("1", "Bilan :") + " " + ", ".join(parts))
         run_on_finish(root, cfg, rc, tasks, completed, failed)
 
 
@@ -1070,11 +1132,17 @@ def cmd_status(args) -> int:
     base = root / TASKS_DIR
     if not base.is_dir():
         raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
-    counts = {d: len(list((base / d).glob("*.md"))) for d in ("todo", "done", "failed")}
-    print(f"Tâches : {counts['todo']} à faire, {counts['done']} terminées, {counts['failed']} en échec")
+    files = {d: sorted((base / d).glob("*.md")) for d in ("todo", "done", "failed")}
+    counts = {d: len(files[d]) for d in files}
+    fail_str = _ansi("1;31" if counts["failed"] else "2", f"{counts['failed']} en échec")
+    print(f"{'Tâches :':<14} {_ansi('36', str(counts['todo']))} à faire, "
+          f"{_ansi('32', str(counts['done']))} terminées, {fail_str}")
+    if files["failed"]:
+        print(f"{'En échec :':<14} " + ", ".join(p.name for p in files["failed"])
+              + _ansi("2", "  (relancer : agent-runner retry <id> ou --all)"))
     usage = base / "logs" / "usage.tsv"
     if not usage.exists():
-        print("Aucune exécution journalisée.")
+        print(_ansi("2", "Aucune exécution journalisée."))
         return 0
     rows = [ln.split("\t") for ln in usage.read_text().splitlines()[1:] if ln.strip()]
     per_task: dict[str, int] = {}
@@ -1087,13 +1155,14 @@ def cmd_status(args) -> int:
         tout += int(r[10])
         by_model[r[5]] = by_model.get(r[5], 0.0) + float(r[11])
     if not rows:
-        print("Aucune exécution journalisée.")
+        print(_ansi("2", "Aucune exécution journalisée."))
         return 0
     escalated = sum(1 for n in per_task.values() if n > 1)
-    print(f"Tentatives : {len(rows)} sur {len(per_task)} tâches ; escaladées : {escalated} "
+    print(f"{'Tentatives :':<14} {len(rows)} sur {len(per_task)} tâches ; escaladées : {escalated} "
           f"({100 * escalated / len(per_task):.0f} %)")
-    print(f"Tokens : entrée (cache inclus) {int(tin)}, sortie {int(tout)}")
-    print(f"Coût cumulé : ${cost:.2f}  (" + ", ".join(f"{m} ${c:.2f}" for m, c in by_model.items()) + ")")
+    print(f"{'Tokens :':<14} entrée (cache inclus) {_fmt_int(tin)}, sortie {_fmt_int(tout)}")
+    breakdown = ", ".join(f"{m} ${c:.2f}" for m, c in by_model.items())
+    print(f"{'Coût cumulé :':<14} {_ansi('1', f'${cost:.2f}')}  " + _ansi("2", f"({breakdown})"))
     return 0
 
 
@@ -1182,7 +1251,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except Fail as exc:
-        print(f"agent-runner: {exc}", file=sys.stderr)
+        print(_ansi("1;31", "agent-runner:", sys.stderr) + f" {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\nagent-runner: interrompu ; relancer avec --resume pour reprendre le travail partiel.",

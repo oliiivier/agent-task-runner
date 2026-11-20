@@ -8,7 +8,7 @@ default_verify_cmd = ""
 default_allowed_tools = ["Bash(git:*)", "Bash(move-lines:*)", "Bash(ls:*)", "Bash(grep:*)", "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)"]
 default_max_turns = 35
 default_timeout_sec = 900
-permission = "accept"   # "accept" (acceptEdits) ou "bypass" (--dangerously-skip-permissions)
+permission = "bypass"   # "accept" (acceptEdits) ou "bypass" (--dangerously-skip-permissions)
 strict_allowed_tools = false   # true : pas de repli auto vers un runner qui ignore allowed_tools (agy, codex)
 # on_finish_cmd = 'notify-send agent-runner "$AGENT_RUNNER_STATUS : $AGENT_RUNNER_DONE/$AGENT_RUNNER_TOTAL"'
 #   lancé en fin de `run` ; variables AGENT_RUNNER_{STATUS,EXIT_CODE,TOTAL,DONE,FAILED,DONE_IDS,FAILED_IDS,REPO}

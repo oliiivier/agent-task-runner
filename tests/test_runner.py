@@ -77,6 +77,11 @@ model = argv[argv.index("--model") + 1]
 with open(os.environ["FAKE_LOG"], "a") as fh:
     fh.write(json.dumps({"runner": "agy", "model": model, "prompt": prompt, "argv": argv}) + "\n")
 n = len(open(os.environ["FAKE_LOG"]).read().splitlines())
+if os.environ.get("FAKE_AGY_HEADLESS_DENIED") == "1" and "--mode" in argv:
+    print('a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.',
+          file=sys.stderr)
+    print(json.dumps({"result": "blocked", "is_error": False, "usage": {"input_tokens": 1, "output_tokens": 1}}))
+    sys.exit(0)
 open(f"agy-{n}.txt", "w").write(model)
 subprocess.run(["git", "add", "-A"], check=True)
 subprocess.run(["git", "commit", "-q", "-m", f"feat: agy work {n}"], check=True)
@@ -437,8 +442,9 @@ class RoutingTests(Base):
         self.add_task("01-a.md", model="opus", fallback_runner="agy")
         self.add_task("02-b.md", model="haiku", fallback_runner="none")
         r = self.runner("run", "--dry-run", "--avoid-runner", "claude")
-        self.assertIn("01-a.md: [default] agy gemini-4-neon-medium (au lieu de claude)", r.stdout)
-        self.assertIn("02-b.md: [default] claude haiku", r.stdout)
+        self.assertIn("[default]", r.stdout)
+        self.assertIn("01-a.md  agy     gemini-4-neon-medium  (au lieu de claude)", r.stdout)
+        self.assertIn("02-b.md  claude  haiku", r.stdout)
         r = self.runner("run", "--avoid-runner", "claude")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual([c.get("runner", "claude") for c in self.calls()], ["agy", "claude"])
@@ -478,10 +484,10 @@ class RoutingTests(Base):
     def test_auto_fallback_without_fallback_runner(self):
         self.add_task("01-a.md", model="sonnet", max_model="opus")  # pas de fallback_runner
         r = self.runner("run", "--dry-run", FAKE_CLAUDE_LOGGED_OUT="1")
-        self.assertIn("01-a.md: [default] agy gemini-4-argon-medium -> gemini-4-neon-medium "
+        self.assertIn("01-a.md  agy     gemini-4-argon-medium -> gemini-4-neon-medium  "
                       "(au lieu de claude, repli auto)", r.stdout)
         r = self.runner("run", "--dry-run")
-        self.assertIn("01-a.md: [default] claude sonnet -> opus (repli auto agy)", r.stdout)
+        self.assertIn("01-a.md  claude  sonnet -> opus  (repli auto agy)", r.stdout)
         r = self.runner("run", FAKE_QUOTA_MODELS="sonnet")  # quota : bascule aussi sans fallback_runner
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual([(c.get("runner", "claude"), c["model"]) for c in self.calls()],
@@ -522,14 +528,15 @@ class RoutingTests(Base):
         self.add_task("02-b.md", model="opus")
         r = self.runner("run", "--dry-run", FAKE_CODEX_LOGGED_IN="1", FAKE_CLAUDE_LOGGED_OUT="1",
                         FAKE_AGY_LOGGED_OUT="1")
-        self.assertIn("02-b.md: [default] codex gpt-5.4 -> gpt-5.5 (au lieu de claude, repli auto)", r.stdout)
+        self.assertIn("02-b.md  codex   gpt-5.4 -> gpt-5.5  (au lieu de claude, repli auto)", r.stdout)
 
     def test_runners_config_disables_runner(self):
         cfg = self.repo / ".agent-tasks/config.toml"
         cfg.write_text('runners = ["agy"]\n' + cfg.read_text())
         self.add_task("01-a.md", fallback_runner="agy")
         r = self.runner("run", "--dry-run")
-        self.assertIn("01-a.md: [default] agy", r.stdout)
+        self.assertIn("[default]", r.stdout)
+        self.assertIn("01-a.md  agy", r.stdout)
         self.assertIn("désactivé par `runners`", r.stderr)
         self.assertIn("runners disponibles : agy\n", self.runner("models").stdout)
         cfg.write_text(cfg.read_text().replace('runners = ["agy"]', 'runners = ["gpt"]'))
@@ -695,6 +702,14 @@ class ImprovementTests(Base):
         r = self.runner("run", "--dry-run")
         self.assertNotIn("sans restriction d'outils", r.stdout)
         self.assertNotIn("repli", r.stdout)
+
+    def test_agy_headless_permission_denied_stops_escalation(self):
+        self.init()
+        self.add_task("01-a.md", runner="agy", model="gemini-3.8-flash", max_model="gemini-4-hydrogen")
+        r = self.runner("run", FAKE_AGY_HEADLESS_DENIED="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('permission = "bypass"', r.stderr)
+        self.assertEqual(len(self.calls()), 1)  # n'escalade pas inutilement chez agy
 
 
 class OperationsTests(Base):

@@ -20,6 +20,7 @@ EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
 _SUFFIX = re.compile(r"^(?P<family>.+)-(?P<effort>" + "|".join(EFFORT_LEVELS) + r")$")
 DEFAULT_EFFORT = "medium"
 _MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._]*-[a-z0-9._-]+")
+HEADLESS_DENIED_RE = re.compile(r"headless mode cannot prompt for, so it was auto-denied", re.IGNORECASE)
 
 
 def split_model_id(model_id: str) -> tuple[str, str | None]:
@@ -150,6 +151,8 @@ class AgyAdapter(Adapter):
 
     def finalize(self, state: AttemptResult, lines: list[str], req: RunRequest) -> None:
         text = "".join(lines).strip()
+        if HEADLESS_DENIED_RE.search(text):
+            state.permission_denied = True
         data = _extract_json(text)
         if data is None:
             state.result_text = text[-2000:]
