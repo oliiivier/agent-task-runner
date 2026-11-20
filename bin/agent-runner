@@ -1,0 +1,990 @@
+#!/usr/bin/env python3
+"""agent-runner : orchestrateur externe de file de tâches pour CLI d'agents IA.
+
+Voir docs/specification.md. Python 3.11+, bibliothèque standard uniquement.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+TOOL_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(TOOL_ROOT))
+
+from adapters import ADAPTERS, RunRequest, get_adapter  # noqa: E402
+
+TASKS_DIR = ".agent-tasks"
+FAILURE_MARKER = "<!-- agent-runner:failure-report -->"
+RULES_BEGIN = "<!-- BEGIN agent-task-runner -->"
+RULES_END = "<!-- END agent-task-runner -->"
+USAGE_HEADER = [
+    "timestamp", "batch", "id", "try", "runner", "model", "turns", "tokens_in",
+    "cache_write", "cache_read", "tokens_out", "cost_usd", "duration_sec", "status",
+]
+
+DEFAULTS: dict = {
+    "main_branch": "main",
+    "default_runner": "claude",
+    "runners": list(ADAPTERS),
+    # Fiche sans `fallback_runner` : repli automatique sur l'autre runner (`fallback_runner: none` l'interdit).
+    "auto_fallback": True,  # runners autorisés ; un runner absent de la liste est traité comme indisponible
+    "default_verify_cmd": "",
+    "default_allowed_tools": [
+        "Bash(git:*)", "Bash(move-lines:*)", "Bash(ls:*)", "Bash(grep:*)",
+        "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)",
+    ],
+    "default_max_turns": 35,
+    "default_timeout_sec": 900,
+    "permission": "accept",  # "accept" (acceptEdits) | "bypass"
+    "escalation": {adapter: list(cls.default_chain) for adapter, cls in ADAPTERS.items()},
+    # Modèles qu'un CLI ne doit jamais utiliser (motifs fnmatch) : Claude via agy a un quota très réduit.
+    "exclude_models": {"agy": ["claude-*"]},
+    # Équivalences explicites lors d'une bascule vers un runner de repli (clé = runner de destination).
+    # À défaut, transposition au rang relatif dans la chaîne, arrondie vers le haut.
+    "fallback_map": {
+        "agy": {"haiku": "gemini-3.8-flash", "sonnet": "gemini-4-argon", "opus": "gemini-4-neon",
+                "fable": "gemini-4-neon"},
+        "claude": {"gemini-3.8-flash": "haiku", "gemini-4-hydrogen": "sonnet", "gemini-4-argon": "sonnet",
+                   "gemini-4-neon": "opus"},
+    },
+    "extra_args": {},
+}
+
+
+class Fail(Exception):
+    """Erreur fatale (message affiché, code retour 1)."""
+
+
+# --------------------------------------------------------------------------- Git
+def git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        raise Fail(f"git {' '.join(args)} a échoué : {(proc.stderr or proc.stdout).strip()}")
+    return proc
+
+
+def repo_root() -> Path:
+    proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Fail("pas dans un dépôt Git")
+    return Path(proc.stdout.strip())
+
+
+def dirty(root: Path) -> str:
+    return git("status", "--porcelain", "--untracked-files=no", cwd=root).stdout.strip()
+
+
+def branch_exists(root: Path, name: str) -> bool:
+    return git("show-ref", "--verify", "--quiet", f"refs/heads/{name}", cwd=root, check=False).returncode == 0
+
+
+# ------------------------------------------------------------------- Frontmatter
+def _scalar(raw: str):
+    raw = raw.strip()
+    if raw == "" or raw in ("null", "~"):
+        return None
+    if raw in ("true", "True"):
+        return True
+    if raw in ("false", "False"):
+        return False
+    if raw.startswith('"'):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw.strip('"')
+    if raw.startswith("'") and raw.endswith("'") and len(raw) >= 2:
+        return raw[1:-1].replace("''", "'")
+    if raw.startswith("["):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return [_scalar(p) for p in raw.strip("[]").split(",") if p.strip()]
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    if re.fullmatch(r"-?\d+\.\d*", raw):
+        return float(raw)
+    return raw
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Sous-ensemble YAML : `clé: valeur` et listes `- item`. Retourne (métadonnées, corps)."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("frontmatter manquant (le fichier doit commencer par '---')")
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        raise ValueError("frontmatter non terminé (second '---' manquant)") from None
+    meta: dict = {}
+    key = None
+    for raw in lines[1:end]:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^\s+-\s*(.*)$", raw)
+        if m and key is not None:
+            if not isinstance(meta.get(key), list):
+                meta[key] = []
+            meta[key].append(_scalar(m.group(1)))
+            continue
+        m = re.match(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$", raw)
+        if not m:
+            raise ValueError(f"ligne de frontmatter invalide : {raw!r}")
+        key = m.group(1)
+        value = m.group(2)
+        meta[key] = _scalar(value) if value.strip() else None
+    return meta, "\n".join(lines[end + 1 :]).lstrip("\n") + "\n"
+
+
+# ------------------------------------------------------------------------ Config
+def _merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load_config(root: Path) -> dict:
+    cfg = json.loads(json.dumps(DEFAULTS))
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    for path in (xdg / "agent-task-runner" / "config.toml", root / TASKS_DIR / "config.toml"):
+        if path.is_file():
+            try:
+                cfg = _merge(cfg, tomllib.loads(path.read_text()))
+            except tomllib.TOMLDecodeError as exc:
+                raise Fail(f"{path} : TOML invalide : {exc}") from exc
+    return cfg
+
+
+# -------------------------------------------------------------------------- Task
+MERGE_STRATEGIES = ("none", "auto_ff", "auto_no_ff")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+FIELDS = {
+    "id", "batch", "branch", "base_branch", "merge_strategy", "runner", "fallback_runner", "model",
+    "effort", "escalate", "max_model", "verify_cmd", "require_commit", "allowed_tools", "max_turns",
+    "timeout_sec", "max_budget_usd",
+}
+
+
+@dataclass
+class Task:
+    path: Path
+    id: str
+    branch: str
+    body: str
+    batch: str = "default"
+    base_branch: str = "main"
+    merge_strategy: str = "none"
+    runner: str = "claude"
+    fallback_runner: str | None = None
+    fallback_auto: bool = False  # repli déduit (champ absent + auto_fallback), pas écrit dans la fiche
+    model: str | None = None
+    effort: str | None = None
+    escalate: bool = True
+    max_model: str | None = None
+    verify_cmd: str = ""
+    require_commit: bool = True
+    allowed_tools: list[str] = field(default_factory=list)
+    max_turns: int = 35
+    timeout_sec: int = 900
+    max_budget_usd: float | None = None
+
+
+def parse_task(path: Path, cfg: dict) -> Task:
+    try:
+        meta, body = parse_frontmatter(path.read_text())
+        unknown = set(meta) - FIELDS
+        if unknown:
+            raise ValueError(f"champs inconnus : {', '.join(sorted(unknown))}")
+        for req in ("id", "branch"):
+            if not meta.get(req):
+                raise ValueError(f"champ obligatoire manquant : {req}")
+
+        def get(name, default, typ):
+            v = meta.get(name)
+            if v is None:
+                return default
+            if typ is float and isinstance(v, int) and not isinstance(v, bool):
+                v = float(v)
+            if not isinstance(v, typ) or (typ is int and isinstance(v, bool)):
+                raise ValueError(f"{name} : type invalide ({typ.__name__} attendu)")
+            return v
+
+        tools = meta.get("allowed_tools")
+        if tools is None:
+            tools = list(cfg["default_allowed_tools"])
+        elif not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+            raise ValueError("allowed_tools : liste de chaînes attendue")
+        task = Task(
+            path=path,
+            id=str(get("id", "", str)),
+            branch=get("branch", "", str),
+            body=body,
+            batch=get("batch", "default", str),
+            base_branch=get("base_branch", cfg["main_branch"], str),
+            merge_strategy=get("merge_strategy", "none", str),
+            runner=get("runner", cfg["default_runner"], str),
+            fallback_runner=get("fallback_runner", None, str),
+            model=get("model", None, str),
+            effort=get("effort", None, str),
+            escalate=get("escalate", True, bool),
+            max_model=get("max_model", None, str),
+            verify_cmd=get("verify_cmd", cfg["default_verify_cmd"], str),
+            require_commit=get("require_commit", True, bool),
+            allowed_tools=tools,
+            max_turns=get("max_turns", cfg["default_max_turns"], int),
+            timeout_sec=get("timeout_sec", cfg["default_timeout_sec"], int),
+            max_budget_usd=get("max_budget_usd", None, float),
+        )
+        if task.merge_strategy not in MERGE_STRATEGIES:
+            raise ValueError(f"merge_strategy : {task.merge_strategy!r} (attendu : {', '.join(MERGE_STRATEGIES)})")
+        if task.runner not in ADAPTERS:
+            raise ValueError(f"runner : {task.runner!r} (attendu : {', '.join(ADAPTERS)})")
+        if task.fallback_runner == "none":  # repli explicitement interdit
+            task.fallback_runner = None
+        elif task.fallback_runner is None:
+            if not isinstance(cfg.get("auto_fallback"), bool):
+                raise Fail(f"config `auto_fallback` : booléen attendu (reçu {cfg.get('auto_fallback')!r})")
+            if cfg["auto_fallback"]:
+                task.fallback_runner = next((r for r in ADAPTERS if r != task.runner), None)
+                task.fallback_auto = task.fallback_runner is not None
+        elif (
+            task.fallback_runner not in ADAPTERS or task.fallback_runner == task.runner
+        ):
+            raise ValueError(f"fallback_runner : {task.fallback_runner!r} (runner différent de {task.runner!r} "
+                             f"attendu parmi : {', '.join(ADAPTERS)}, ou `none`)")
+        if task.effort is not None and task.effort not in EFFORTS:
+            raise ValueError(f"effort : {task.effort!r} (attendu : {', '.join(EFFORTS)})")
+        if task.max_turns < 1 or task.timeout_sec < 1:
+            raise ValueError("max_turns et timeout_sec doivent être >= 1")
+        chain = cfg["escalation"].get(task.runner) or []
+        if task.max_model and chain and task.max_model not in chain:
+            raise ValueError(f"max_model {task.max_model!r} absent de la chaîne {chain}")
+        return task
+    except ValueError as exc:
+        raise Fail(f"{path.name} : {exc}") from exc
+
+
+def adapter_for(runner: str, cfg: dict):
+    return get_adapter(runner, cfg.get("exclude_models", {}).get(runner))
+
+
+def map_model(model: str | None, src: list[str], dst: list[str], explicit: dict | None = None) -> str | None:
+    """Transpose un modèle d'une chaîne d'escalade vers une autre.
+
+    `explicit` (`[fallback_map.<destination>]`) prime ; sinon rang relatif équivalent, arrondi vers le
+    haut : une bascule ne doit pas rétrograder la tâche.
+    """
+    if model is None or not dst:
+        return None
+    target = (explicit or {}).get(model)
+    if target in dst:
+        return target
+    if model not in src or len(src) < 2:
+        return dst[0]
+    rank = src.index(model) * (len(dst) - 1) / (len(src) - 1)
+    return dst[min(len(dst) - 1, int(rank + 0.5))]
+
+
+def candidate_models(task: Task, cfg: dict, forced: str | None, no_escalate: bool,
+                     runner: str | None = None, start: str | None = None) -> list[str]:
+    """Chaîne de modèles à essayer pour `task` sur `runner` (par défaut son runner nominal).
+
+    Sur le runner de repli, `model`, `max_model` et `--model` sont transposés par `map_model` ;
+    `start` permet de reprendre la chaîne au rang déjà atteint lors d'une bascule.
+    """
+    runner = runner or task.runner
+    chain = cfg["escalation"].get(runner) or []
+    if not chain:
+        raise Fail(f"aucune chaîne d'escalade définie pour le runner {runner!r}")
+    model, max_model = task.model, task.max_model
+    if runner != task.runner:
+        src = cfg["escalation"].get(task.runner) or []
+        explicit = cfg.get("fallback_map", {}).get(runner)
+        model, max_model, forced = (map_model(m, src, chain, explicit) for m in (model, max_model, forced))
+    start = start or forced or model or chain[0]
+    if no_escalate or not task.escalate or start not in chain:
+        return [start]
+    i = chain.index(start)
+    j = chain.index(max_model) if max_model in chain else len(chain) - 1
+    return chain[i : max(i, j) + 1]
+
+
+def pick_runner(task: Task, unavailable: set[str], avoid: set[str]) -> str:
+    """Runner effectif : le nominal, sauf s'il est indisponible/évité et que le repli est utilisable."""
+    alt = task.fallback_runner
+    if alt and alt not in unavailable and (task.runner in unavailable or (task.runner in avoid and alt not in avoid)):
+        return alt
+    return task.runner
+
+
+def load_queue(tasks_dir: Path, cfg: dict, batch: str | None) -> list[Task]:
+    tasks = [parse_task(p, cfg) for p in sorted((tasks_dir / "todo").glob("*.md"))]
+    seen: set[str] = set()
+    for t in tasks:
+        if t.id in seen:
+            raise Fail(f"id de tâche en double : {t.id}")
+        seen.add(t.id)
+    return [t for t in tasks if batch is None or t.batch == batch]
+
+
+# ------------------------------------------------------------------------ Prompt
+def build_prompt(task: Task, root: Path, k: int, prev: dict | None, partial: str) -> str:
+    parts = [
+        f"Tu exécutes UNE tâche d'une file automatisée (id : {task.id}, branche {task.branch}, "
+        "déjà checkoutée). Lis CLAUDE.md s'il existe."
+    ]
+    if prev:
+        status = git("status", "--short", cwd=root).stdout.strip() or "(arbre propre)"
+        stat = git("diff", "--stat", "HEAD", cwd=root).stdout.strip() or "(aucune différence)"
+        parts.append(
+            f"ESCALADE : la tentative {k - 1} ({prev['model']}) a échoué.\n"
+            f"Motif : {prev['reason']}\n"
+            + (f"Sortie de la vérification :\n{prev['verify_tail']}\n" if prev.get("verify_tail") else "")
+            + f"État actuel du dépôt (travail partiel CONSERVÉ — reprends-le, ne recommence pas) :\n"
+            f"git status --short :\n{status}\ngit diff --stat HEAD :\n{stat}\n"
+            "Corrige directement le blocage."
+        )
+    elif partial:
+        parts.append(
+            "REPRISE : une exécution précédente de cette tâche a été interrompue. L'arbre contient "
+            f"son travail partiel non commité :\n{partial}\n"
+            "Inspecte-le (git diff) et termine-le plutôt que de recommencer ; ne l'annule que s'il est incohérent."
+        )
+    parts.append("## Tâche\n\n" + task.body.strip())
+    rules = [
+        "Réalise cette tâche, et uniquement elle (les tâches précédentes sont déjà commitées, "
+        "les suivantes ne te concernent pas).",
+        "Crée UN seul commit, message en anglais au format conventionnel."
+        if task.require_commit
+        else "Ne crée aucun commit : cette tâche ne modifie pas le dépôt (audit/baseline).",
+        "Modifie les fichiers avec Edit/Write ; pour déplacer un gros bloc de lignes entre fichiers, "
+        "utilise `move-lines <src> <début> <fin> <dst>` plutôt que de réécrire le code.",
+        "Ne touche jamais à .agent-tasks/ et n'écris rien hors du dépôt.",
+        "Si tu es bloqué, ne commite rien de cassé et explique le blocage.",
+    ]
+    if task.verify_cmd:
+        rules.insert(2, f"Après ton travail, le runner exécutera `{task.verify_cmd}` ; "
+                        "lance-la toi-même et corrige jusqu'au succès.")
+    parts.append("## Règles d'exécution\n\n" + "\n".join(f"- {r}" for r in rules))
+    return "\n\n".join(parts)
+
+
+# ----------------------------------------------------------------------- Logging
+def log_usage(logs: Path, task: Task, k: int, runner: str, model: str, res, status: str) -> None:
+    path = logs / "usage.tsv"
+    new = not path.exists()
+    row = [
+        datetime.now(timezone.utc).isoformat(timespec="seconds"), task.batch, task.id, k, runner,
+        model, res.turns, res.tokens_in, res.cache_write, res.cache_read, res.tokens_out,
+        f"{res.cost_usd:.4f}", f"{res.duration_sec:.0f}", status,
+    ]
+    with path.open("a") as fh:
+        if new:
+            fh.write("\t".join(USAGE_HEADER) + "\n")
+        fh.write("\t".join(str(c) for c in row) + "\n")
+
+
+def tail(text: str, n: int = 4000) -> str:
+    return text if len(text) <= n else "[...]\n" + text[-n:]
+
+
+# --------------------------------------------------------------------- Exécution
+def evaluate(task: Task, root: Path, res, head_before: str, log_base: Path) -> tuple[str, str, str]:
+    """Valide C1..C4. Retourne (statut, motif, extrait de sortie de verify_cmd)."""
+    if res.error:  # C1
+        code = ("quota" if res.quota_hit else "timeout" if res.timed_out
+                else "max_turns" if res.max_turns_hit else "error")
+        return code, res.error, ""
+    if dirty(root):  # C2
+        return "dirty", "fichiers suivis modifiés non commités après l'exécution", ""
+    if task.require_commit and git("rev-parse", "HEAD", cwd=root).stdout.strip() == head_before:  # C3
+        return "no_commit", "HEAD n'a pas avancé (require_commit=true)", ""
+    if task.verify_cmd:  # C4
+        try:
+            proc = subprocess.run(task.verify_cmd, shell=True, cwd=root, capture_output=True,
+                                  text=True, errors="replace", timeout=task.timeout_sec)
+            out, rc = (proc.stdout + proc.stderr), proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            out = (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            rc = None
+        Path(f"{log_base}.verify.log").write_text(out)
+        if rc != 0:
+            why = "timeout" if rc is None else f"code retour {rc}"
+            return "verify_failed", f"verify_cmd en échec ({why}) : {task.verify_cmd}", tail(out)
+    return "success", "", ""
+
+
+def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool) -> bool:
+    tasks_dir = root / TASKS_DIR
+    logs = tasks_dir / "logs"
+    logs.mkdir(exist_ok=True)
+
+    current = git("branch", "--show-current", cwd=root).stdout.strip()
+    is_dirty = dirty(root)
+    if is_dirty and not allow_dirty:
+        raise Fail("arbre de travail non propre (fichiers suivis modifiés) : commit/stash, ou --resume pour reprendre")
+    if is_dirty and current != task.branch:
+        raise Fail(f"--resume : l'arbre modifié n'est pas sur {task.branch} (actuellement {current or 'HEAD détaché'})")
+    if branch_exists(root, task.branch):
+        git("checkout", task.branch, cwd=root)
+    else:
+        git("checkout", "-b", task.branch, task.base_branch, cwd=root)
+    head_before = git("rev-parse", "HEAD", cwd=root).stdout.strip()
+    partial = git("status", "--short", cwd=root).stdout.strip() if is_dirty else ""
+
+    unavailable: set[str] = args.unavailable  # partagé entre tâches : un quota atteint vaut pour la suite
+    runner = pick_runner(task, unavailable, set(args.avoid_runner or []))
+    if runner in unavailable:
+        raise Fail(f"{task.id} : runner {runner!r} indisponible (quota ou exécutable absent) et aucun "
+                   "fallback_runner utilisable")
+    queue = candidate_models(task, cfg, args.model, args.no_escalate, runner)
+    attempts: list[dict] = []
+    prev: dict | None = None
+    note = f" (repli de {task.runner})" if runner != task.runner else ""
+    print(f"=== {task.id} [{task.batch}] branche {task.branch} — {runner}{note} : {' -> '.join(queue)}")
+
+    k = 0
+    while queue:
+        model = queue.pop(0)
+        k += 1
+        if prev and prev["status"] != "quota":
+            print(f"    escalade {prev['model']} -> {model}")
+        adapter = adapter_for(runner, cfg)
+        try:
+            model_id = adapter.resolve_model(model, task.effort, args.catalogs.get(runner))
+        except ValueError as exc:
+            raise Fail(f"{task.id} : {exc}") from exc
+        safe = re.sub(r"[^\w.-]", "_", f"{runner}-{model_id}" if runner != task.runner else model_id)
+        log_base = logs / f"{task.id}.try{k}-{safe}"
+        req = RunRequest(
+            prompt=build_prompt(task, root, k, prev, partial if k == 1 else ""),
+            model=model_id, cwd=root, allowed_tools=task.allowed_tools, max_turns=task.max_turns,
+            timeout_sec=task.timeout_sec, max_budget_usd=task.max_budget_usd,
+            permission_mode=cfg["permission"], effort=task.effort,
+            extra_args=list(cfg.get("extra_args", {}).get(runner, [])),
+        )
+        shown = model_id if model_id != model else model + (f" (effort {task.effort})" if task.effort else "")
+        print(f"    tentative {k} : {runner} {shown}"
+              + " ...", flush=True)
+        res = adapter.run(req, Path(f"{log_base}.log"), Path(f"{log_base}.json"))
+        status, reason, verify_tail = evaluate(task, root, res, head_before, log_base)
+        log_usage(logs, task, k, runner, model_id, res, status)
+        print(f"    -> {status}" + (f" : {reason}" if reason else "")
+              + f"  (tours={res.turns}, coût=${res.cost_usd:.2f}, {res.duration_sec:.0f}s)")
+        attempts.append({"k": k, "model": f"{runner} {model_id}", "status": status, "reason": reason})
+        if status == "success":
+            shutil.move(str(task.path), str(tasks_dir / "done" / task.path.name))
+            return True
+        prev = {"model": f"{runner} {model_id}", "status": status, "reason": reason, "verify_tail": verify_tail}
+        if status == "quota":
+            # Le fournisseur est saturé : inutile d'escalader chez lui. On bascule sur le repli en
+            # reprenant au rang équivalent, et on le marque indisponible pour les tâches suivantes.
+            unavailable.add(runner)
+            alt = task.fallback_runner if task.fallback_runner not in unavailable else None
+            if alt is None or runner == alt:
+                print(f"    quota {runner} atteint, aucun runner de repli disponible.", file=sys.stderr)
+                break
+            src = cfg["escalation"].get(runner) or []
+            dst = cfg["escalation"].get(alt) or []
+            start = map_model(model, src, dst, cfg.get("fallback_map", {}).get(alt))
+            queue = candidate_models(task, cfg, args.model, args.no_escalate, alt, start=start)
+            print(f"    bascule {runner} -> {alt} : {' -> '.join(queue)}")
+            runner = alt
+
+    # Échec définitif
+    if not args.continue_on_error:
+        print(f"    ÉCHEC de {task.id} : tâche laissée dans todo/ avec l'état partiel (--resume pour reprendre).",
+              file=sys.stderr)
+        return False
+    git("reset", "--hard", head_before, cwd=root)
+    git("clean", "-fd", "-e", TASKS_DIR, cwd=root)
+    report = [f"\n{FAILURE_MARKER}", "## Rapport d'échec (agent-runner)", ""]
+    for a in attempts:
+        report.append(f"- Tentative {a['k']} ({a['model']}) : {a['status']} — {a['reason']}")
+    if prev and prev.get("verify_tail"):
+        report += ["", "Dernière sortie de verify_cmd :", "```", prev["verify_tail"], "```"]
+    with task.path.open("a") as fh:
+        fh.write("\n".join(report) + "\n")
+    shutil.move(str(task.path), str(tasks_dir / "failed" / task.path.name))
+    print(f"    ÉCHEC de {task.id} : arbre réinitialisé, tâche déplacée vers failed/.", file=sys.stderr)
+    return False
+
+
+def finalize_batches(root: Path, cfg: dict, completed: list[Task]) -> int:
+    tasks_dir = root / TASKS_DIR
+    last: dict[str, Task] = {}
+    for t in completed:
+        last[t.batch] = t
+    rc = 0
+    for batch, t in last.items():
+        if t.merge_strategy == "none":
+            continue
+        remaining = []
+        for folder in ("todo", "failed"):
+            for p in sorted((tasks_dir / folder).glob("*.md")):
+                try:
+                    meta, _ = parse_frontmatter(p.read_text())
+                except ValueError:
+                    continue
+                if meta.get("batch", "default") == batch:
+                    remaining.append(f"{folder}/{p.name}")
+        if remaining:
+            print(f"lot {batch} : non finalisé, tâches restantes : {', '.join(remaining)}")
+            continue
+        if dirty(root):
+            print(f"lot {batch} : merge impossible, arbre non propre", file=sys.stderr)
+            rc = 1
+            continue
+        git("checkout", t.base_branch, cwd=root)
+        flag = "--ff-only" if t.merge_strategy == "auto_ff" else "--no-ff"
+        proc = git("merge", flag, *(["--no-edit"] if flag == "--no-ff" else []), t.branch, cwd=root, check=False)
+        if proc.returncode != 0:
+            git("merge", "--abort", cwd=root, check=False)
+            print(f"lot {batch} : merge {t.merge_strategy} de {t.branch} dans {t.base_branch} impossible "
+                  f"(branche conservée) : {(proc.stderr or proc.stdout).strip()}", file=sys.stderr)
+            rc = 1
+            continue
+        git("branch", "-d", t.branch, cwd=root)
+        print(f"lot {batch} : {t.branch} fusionnée dans {t.base_branch} ({t.merge_strategy}), branche supprimée.")
+    return rc
+
+
+def enabled_runners(cfg: dict) -> list[str]:
+    runners = cfg.get("runners")
+    if not isinstance(runners, list) or not all(r in ADAPTERS for r in runners):
+        raise Fail(f"config `runners` : liste attendue parmi {', '.join(ADAPTERS)} (reçu {runners!r})")
+    return runners
+
+
+def probe_runners(cfg: dict, runners) -> tuple[dict[str, str | None], dict[str, dict[str, list[str]]]]:
+    """Disponibilité de chaque runner (None si utilisable, sinon le motif) et catalogues de modèles.
+
+    Un runner est utilisable s'il est autorisé par `runners`, présent dans le PATH et connecté.
+    Interroge les CLI une seule fois (le catalogue agy sert aussi de test de connexion).
+    """
+    enabled = enabled_runners(cfg)
+    status: dict[str, str | None] = {}
+    catalogs: dict[str, dict[str, list[str]]] = {}
+    for runner in sorted(runners):
+        adapter = adapter_for(runner, cfg)
+        if runner not in enabled:
+            status[runner] = "désactivé par `runners` dans config.toml"
+        elif not shutil.which(adapter.executable):
+            status[runner] = f"{adapter.executable} introuvable dans le PATH"
+        else:
+            status[runner], catalog = adapter.probe()
+            if catalog is not None:
+                catalogs[runner] = catalog
+    return status, catalogs
+
+
+def check_models(cfg: dict, tasks: list[Task], catalogs: dict) -> None:
+    """Retire des chaînes les modèles absents du catalogue ; échoue si une tâche en dépend directement."""
+    for runner, catalog in catalogs.items():
+        chain = cfg["escalation"].get(runner) or []
+        missing = [m for m in chain if m not in catalog and m.rsplit("-", 1)[0] not in catalog]
+        if not missing:
+            continue
+        print(f"avertissement : [escalation].{runner} contient des modèles absents du catalogue "
+              f"({', '.join(missing)}) ; ignorés. Voir `agent-runner models`.", file=sys.stderr)
+        cfg["escalation"][runner] = [m for m in chain if m not in missing]
+        for t in tasks:
+            if t.runner == runner and (t.model in missing or t.max_model in missing):
+                raise Fail(f"{t.path.name} : modèle {runner} indisponible ({t.model or t.max_model}) ; "
+                           "corriger la fiche ou [escalation]")
+
+
+def cmd_models(args) -> int:
+    """Affiche, par runner, la chaîne configurée et le catalogue réellement disponible."""
+    try:
+        cfg = load_config(repo_root())
+    except Fail:
+        cfg = json.loads(json.dumps(DEFAULTS))
+    runners = [args.runner] if args.runner else sorted(ADAPTERS)
+    status, catalogs = probe_runners(cfg, runners)
+    ok = [r for r in runners if not status[r]]
+    print(f"runners disponibles : {', '.join(ok) or 'aucun'}")
+    for r in runners:
+        if status[r]:
+            print(f"runner indisponible : {r} ({status[r]})")
+    print(f"default_runner : {cfg['default_runner']}\n")
+    for runner in runners:
+        adapter = adapter_for(runner, cfg)
+        chain = cfg["escalation"].get(runner) or []
+        print(f"[{runner}] chaîne : {' -> '.join(chain) or '-'}")
+        if adapter.exclude:
+            print(f"  exclus : {', '.join(adapter.exclude)}")
+        if status[runner]:
+            print(f"  indisponible : {status[runner]}")
+            continue
+        catalog = catalogs.get(runner)
+        if catalog is None:
+            print("  (pas de catalogue exposé par le CLI : alias de la chaîne utilisés tels quels)")
+            continue
+        for family, efforts in catalog.items():
+            mark = "*" if family in chain else " "
+            print(f"  {mark} {family:<34} {', '.join(efforts) or '(sans effort)'}")
+        for m in chain:
+            if m not in catalog:
+                print(f"  ! {m} : absent du catalogue")
+    return 0
+
+
+def cmd_run(args) -> int:
+    root = repo_root()
+    tasks_dir = root / TASKS_DIR
+    if not tasks_dir.is_dir():
+        raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    cfg = load_config(root)
+    tasks = load_queue(tasks_dir, cfg, args.batch)
+    if not tasks:
+        print("Aucune tâche à exécuter.")
+        return 0
+    avoid = set(args.avoid_runner or [])
+    used = {t.runner for t in tasks} | {t.fallback_runner for t in tasks if t.fallback_runner}
+    preference = enabled_runners(cfg)  # ordre de `runners` = préférence pour le repli automatique
+    status, args.catalogs = probe_runners(cfg, used | set(preference))
+    args.unavailable = {r for r, why in status.items() if why and r in used}
+    for t in tasks:  # repli automatique : premier autre runner réellement utilisable
+        if t.fallback_auto:
+            t.fallback_runner = next((r for r in preference if r != t.runner and not status[r]), t.fallback_runner)
+            if status.get(t.fallback_runner):
+                args.unavailable.add(t.fallback_runner)
+    for r in sorted(args.unavailable):
+        print(f"runner indisponible : {r} ({status[r]})", file=sys.stderr)
+    check_models(cfg, tasks, args.catalogs)
+    if args.dry_run:
+        for t in tasks:
+            runner = pick_runner(t, args.unavailable, avoid)
+            adapter = adapter_for(runner, cfg)
+            chain = [adapter.resolve_model(m, t.effort, args.catalogs.get(runner))
+                     for m in candidate_models(t, cfg, args.model, args.no_escalate, runner)]
+            fb = ""
+            if t.fallback_runner and t.fallback_runner != runner:
+                fb = f" (repli {'auto ' if t.fallback_auto else ''}{t.fallback_runner})"
+            elif runner != t.runner:
+                fb = f" (au lieu de {t.runner}{', repli auto' if t.fallback_auto else ''})"
+            if runner in args.unavailable:
+                fb += f" [INDISPONIBLE : {status[runner]}]"
+            print(f"{t.path.name}: [{t.batch}] {runner} {' -> '.join(chain)}{fb} | effort={t.effort or '-'} "
+                  f"| branche {t.branch} (base {t.base_branch}) | merge={t.merge_strategy} "
+                  f"| max_turns={t.max_turns} | verify={t.verify_cmd or '-'}")
+        return 0
+    if git("check-ignore", "-q", TASKS_DIR, cwd=root, check=False).returncode != 0:
+        raise Fail(".agent-tasks n'est pas ignoré par Git : relancer `agent-runner init`")
+    for t in tasks:
+        runner = pick_runner(t, args.unavailable, avoid)
+        if runner in args.unavailable:
+            raise Fail(f"{t.id} : runner {runner} indisponible ({status[runner]}) "
+                       "et aucun repli disponible (fallback_runner: none, auto_fallback = false "
+                       "ou runner de repli lui aussi indisponible)")
+    completed: list[Task] = []
+    failed = False
+    for i, task in enumerate(tasks):
+        if execute_task(root, cfg, task, args, allow_dirty=args.resume and i == 0):
+            completed.append(task)
+        elif args.continue_on_error:
+            failed = True
+        else:
+            return 1
+    rc = finalize_batches(root, cfg, completed)
+    return 1 if failed else rc
+
+
+# -------------------------------------------------------------------------- Init
+def detect_stack(root: Path) -> tuple[str, list[str]]:
+    verify, tools = "", []
+    checks = sorted((root / "tools").glob("check-*.sh")) if (root / "tools").is_dir() else []
+    if checks:
+        verify = f"tools/{checks[0].name}"
+        tools += [f"Bash(tools/{c.name}:*)" for c in checks]
+    if (root / "Cargo.toml").exists():
+        verify = verify or "cargo test --quiet"
+        tools.append("Bash(cargo:*)")
+    if (root / "gradlew").exists():
+        verify = verify or "./gradlew test"
+        tools.append("Bash(./gradlew:*)")
+    if (root / "pyproject.toml").exists():
+        verify = verify or "python -m pytest -q"
+        tools += ["Bash(python:*)", "Bash(pytest:*)"]
+    if (root / "package.json").exists():
+        verify = verify or "npm test --silent"
+        tools += ["Bash(npm:*)", "Bash(npx:*)"]
+    return verify, tools
+
+
+def render_config(main: str, verify: str, tools: list[str], default_runner: str = "claude") -> str:
+    j = json.dumps
+    allowed = list(DEFAULTS["default_allowed_tools"]) + [t for t in tools if t not in DEFAULTS["default_allowed_tools"]]
+    esc = "\n".join(f"{name} = {j(chain)}" for name, chain in DEFAULTS["escalation"].items())
+    excl = "\n".join(f"{name} = {j(pats)}" for name, pats in DEFAULTS["exclude_models"].items())
+    fmap = "\n\n".join(f"[fallback_map.{dst}]\n" + "\n".join(f"{j(k)} = {j(v)}" for k, v in m.items())
+                       for dst, m in DEFAULTS["fallback_map"].items())
+    return f"""# Configuration agent-runner (projet). Surcharge ~/.config/agent-task-runner/config.toml.
+main_branch = {j(main)}
+default_runner = {j(default_runner)}   # choisi par `agent-runner init` parmi les runners installés et connectés
+# runners = {j(list(ADAPTERS))}   # runners autorisés (défaut : tous) ; les autres sont traités comme indisponibles
+auto_fallback = true   # fiche sans fallback_runner : repli sur l'autre runner (`fallback_runner: none` l'interdit)
+default_verify_cmd = {j(verify)}
+default_allowed_tools = {j(allowed, ensure_ascii=False)}
+default_max_turns = {DEFAULTS["default_max_turns"]}
+default_timeout_sec = {DEFAULTS["default_timeout_sec"]}
+permission = "accept"   # "accept" (acceptEdits) ou "bypass" (--dangerously-skip-permissions)
+
+# Chaînes d'escalade, du modèle le moins cher au plus puissant.
+# agy : familles sans suffixe d'effort ; le runner compose `<famille>-<effort>` d'après `agy models`
+# (`agent-runner models` affiche le catalogue disponible).
+[escalation]
+{esc}
+
+# Modèles à ne jamais utiliser via un CLI (motifs fnmatch).
+[exclude_models]
+{excl}
+
+# Équivalences lors d'une bascule vers le runner de repli (table = runner de destination).
+{fmap}
+
+# Arguments CLI supplémentaires par runner.
+[extra_args]
+# claude = []
+# agy = []
+# codex = []
+"""
+
+
+def choose_default_runner(current: str, status: dict[str, str | None]) -> str | None:
+    """Garde `current` s'il est utilisable, sinon le premier runner utilisable (ordre de ADAPTERS)."""
+    if not status.get(current):
+        return current
+    return next((r for r in ADAPTERS if not status.get(r)), None)
+
+
+def set_toml_key(text: str, key: str, value: str) -> str:
+    """Fixe une clé de premier niveau d'un TOML en préservant le reste du fichier (commentaires compris)."""
+    literal = json.dumps(value)
+    pat = re.compile(rf'^({re.escape(key)}\s*=\s*)("[^"]*"|\S+)', re.M)
+    # Une clé de premier niveau précède toute table : on ne cherche qu'avant le premier `[table]`.
+    first_table = re.search(r"^\s*\[", text, re.M)
+    head_end = first_table.start() if first_table else len(text)
+    m = pat.search(text, 0, head_end)
+    if m:
+        return text[: m.start(2)] + literal + text[m.end(2):]
+    line = f"{key} = {literal}\n"
+    if first_table:
+        return text[:head_end] + line + "\n" + text[head_end:]
+    return text + ("" if not text or text.endswith("\n") else "\n") + line
+
+
+def configure_default_runner(root: Path, cfg_path: Path) -> str | None:
+    """Vérifie les runners (PATH + connexion) et retourne le default_runner à utiliser (None si aucun)."""
+    try:
+        cfg = load_config(root)
+    except Fail as exc:
+        print(f"avertissement : {exc} ; détection des runners avec la configuration par défaut", file=sys.stderr)
+        cfg = json.loads(json.dumps(DEFAULTS))
+    status, _ = probe_runners(cfg, ADAPTERS)
+    for r in ADAPTERS:
+        print(f"runner {r} : " + (f"indisponible ({status[r]})" if status[r] else "installé et connecté"))
+    current = cfg["default_runner"] if cfg.get("default_runner") in ADAPTERS else "claude"
+    chosen = choose_default_runner(current, status)
+    if chosen is None:
+        print("avertissement : aucun runner utilisable ; default_runner inchangé "
+              f"({current}). Installer/connecter {' ou '.join(ADAPTERS)} puis relancer `agent-runner init`.", file=sys.stderr)
+        return None
+    if not cfg_path.exists():
+        return chosen
+    text = cfg_path.read_text()
+    if chosen != current:
+        try:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            print(f"avertissement : {cfg_path} invalide, default_runner non modifié", file=sys.stderr)
+            return chosen
+        cfg_path.write_text(set_toml_key(text, "default_runner", chosen))
+        print(f"default_runner : {current} -> {chosen} ({current} {status[current]})")
+    else:
+        print(f"default_runner : {chosen} (inchangé)")
+    return chosen
+
+
+def agent_rules_block() -> str:
+    return (
+        f"{RULES_BEGIN}\n"
+        "## agent-task-runner\n\n"
+        "- Ne modifie jamais `.agent-tasks/` (file de tâches gérée par `agent-runner`).\n"
+        "- Pour déplacer un gros bloc de lignes (300+) entre fichiers, utilise "
+        "`move-lines <src> <début> <fin> <dst>` au lieu de réécrire le code.\n"
+        f"{RULES_END}\n"
+    )
+
+
+def inject_rules(path: Path, create: bool) -> bool:
+    if not path.exists():
+        if not create:
+            return False
+        path.write_text(agent_rules_block())
+        return True
+    text = path.read_text()
+    block = agent_rules_block()
+    pat = re.compile(re.escape(RULES_BEGIN) + r".*?" + re.escape(RULES_END) + r"\n?", re.S)
+    new = pat.sub(lambda _m: block, text) if pat.search(text) else text.rstrip("\n") + "\n\n" + block
+    if new != text:
+        path.write_text(new)
+    return True
+
+
+def cmd_init(args) -> int:
+    root = repo_root()
+    base = root / TASKS_DIR
+    for d in ("todo", "done", "failed", "logs"):
+        (base / d).mkdir(parents=True, exist_ok=True)
+    example = base / "todo" / "00-example.md.disabled"
+    if not example.exists():
+        shutil.copy(TOOL_ROOT / "templates" / "example-task.md", example)
+
+    if args.gitignore:
+        target = root / ".gitignore"
+    else:
+        target = Path(git("rev-parse", "--git-path", "info/exclude", cwd=root).stdout.strip())
+        if not target.is_absolute():
+            target = root / target
+        target.parent.mkdir(parents=True, exist_ok=True)
+    existing = target.read_text() if target.exists() else ""
+    if not any(ln.strip() in (".agent-tasks/", ".agent-tasks", "/.agent-tasks/", "/.agent-tasks") for ln in existing.splitlines()):
+        with target.open("a") as fh:
+            fh.write(("" if not existing or existing.endswith("\n") else "\n") + ".agent-tasks/\n")
+
+    cfg_path = base / "config.toml"
+    default_runner = configure_default_runner(root, cfg_path)
+    if not cfg_path.exists():
+        main = next((b for b in ("main", "master") if branch_exists(root, b)), "main")
+        verify, tools = detect_stack(root)
+        cfg_path.write_text(render_config(main, verify, tools, default_runner or "claude"))
+        print(f"config.toml généré (default_runner : {default_runner or 'claude'}, verify par défaut : {verify or '-'})")
+    if args.with_agent_rules:
+        inject_rules(root / "CLAUDE.md", create=True)
+        inject_rules(root / "AGENTS.md", create=False)
+        print("consignes ajoutées à CLAUDE.md (et AGENTS.md s'il existe)")
+    print(f"{TASKS_DIR}/ initialisé dans {root}")
+    return 0
+
+
+# ----------------------------------------------------------------- status/retry/clean
+def cmd_status(args) -> int:
+    root = repo_root()
+    base = root / TASKS_DIR
+    if not base.is_dir():
+        raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    counts = {d: len(list((base / d).glob("*.md"))) for d in ("todo", "done", "failed")}
+    print(f"Tâches : {counts['todo']} à faire, {counts['done']} terminées, {counts['failed']} en échec")
+    usage = base / "logs" / "usage.tsv"
+    if not usage.exists():
+        print("Aucune exécution journalisée.")
+        return 0
+    rows = [ln.split("\t") for ln in usage.read_text().splitlines()[1:] if ln.strip()]
+    per_task: dict[str, int] = {}
+    cost = tin = tout = 0.0
+    by_model: dict[str, float] = {}
+    for r in rows:
+        per_task[r[2]] = max(per_task.get(r[2], 0), int(r[3]))
+        cost += float(r[11])
+        tin += int(r[7]) + int(r[8]) + int(r[9])
+        tout += int(r[10])
+        by_model[r[5]] = by_model.get(r[5], 0.0) + float(r[11])
+    escalated = sum(1 for n in per_task.values() if n > 1)
+    print(f"Tentatives : {len(rows)} sur {len(per_task)} tâches ; escaladées : {escalated} "
+          f"({100 * escalated / len(per_task):.0f} %)")
+    print(f"Tokens : entrée (cache inclus) {int(tin)}, sortie {int(tout)}")
+    print(f"Coût cumulé : ${cost:.2f}  (" + ", ".join(f"{m} ${c:.2f}" for m, c in by_model.items()) + ")")
+    return 0
+
+
+def cmd_retry(args) -> int:
+    root = repo_root()
+    base = root / TASKS_DIR
+    for p in sorted((base / "failed").glob("*.md")):
+        try:
+            meta, _ = parse_frontmatter(p.read_text())
+        except ValueError:
+            meta = {}
+        if args.id in (meta.get("id"), p.stem):
+            text = p.read_text()
+            if FAILURE_MARKER in text:
+                text = text[: text.index(FAILURE_MARKER)].rstrip("\n") + "\n"
+            dest = base / "todo" / p.name
+            dest.write_text(text)
+            p.unlink()
+            print(f"{p.name} remise dans todo/")
+            return 0
+    raise Fail(f"tâche {args.id!r} introuvable dans failed/")
+
+
+def cmd_clean(args) -> int:
+    root = repo_root()
+    base = root / TASKS_DIR
+    targets = ["logs"] + (["done"] if args.all else [])
+    for d in targets:
+        shutil.rmtree(base / d, ignore_errors=True)
+        (base / d).mkdir(exist_ok=True)
+    print("supprimé : " + ", ".join(f"{d}/" for d in targets))
+    return 0
+
+
+# --------------------------------------------------------------------------- CLI
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="agent-runner", description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("init", help="initialise .agent-tasks/ dans le dépôt courant")
+    p.add_argument("--gitignore", action="store_true", help="utilise .gitignore au lieu de .git/info/exclude")
+    p.add_argument("--with-agent-rules", action="store_true", help="ajoute les consignes à CLAUDE.md / AGENTS.md")
+    p.set_defaults(func=cmd_init)
+    p = sub.add_parser("run", help="exécute les tâches de .agent-tasks/todo/")
+    p.add_argument("--batch", help="ne traite que ce lot")
+    p.add_argument("--dry-run", action="store_true", help="affiche le plan sans exécuter")
+    p.add_argument("--resume", action="store_true", help="reprend en conservant les modifications partielles")
+    p.add_argument("--continue-on-error", action="store_true", help="rollback vers failed/ et continue")
+    p.add_argument("--model", help="force le modèle de départ")
+    p.add_argument("--no-escalate", action="store_true", help="désactive l'escalade de modèle")
+    p.add_argument("--avoid-runner", action="append", choices=sorted(ADAPTERS), metavar="RUNNER",
+                   help="bascule d'emblée sur leur runner de repli les tâches de ce runner (ex. quota presque plein) ; "
+                        "répétable")
+    p.set_defaults(func=cmd_run)
+    p = sub.add_parser("models", help="chaînes configurées et modèles disponibles (agy models)")
+    p.add_argument("runner", nargs="?", choices=sorted(ADAPTERS))
+    p.set_defaults(func=cmd_models)
+    p = sub.add_parser("status", help="avancement, taux d'escalade et coûts")
+    p.set_defaults(func=cmd_status)
+    p = sub.add_parser("retry", help="remet une tâche de failed/ dans todo/")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_retry)
+    p = sub.add_parser("clean", help="supprime logs/ (et done/ avec --all)")
+    p.add_argument("--all", action="store_true")
+    p.set_defaults(func=cmd_clean)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except Fail as exc:
+        print(f"agent-runner: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nagent-runner: interrompu ; relancer avec --resume pour reprendre le travail partiel.",
+              file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

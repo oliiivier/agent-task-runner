@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "agent-task-runner : frontmatter d'une tâche",
+  "type": "object",
+  "required": ["id", "branch"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "minLength": 1, "description": "Identifiant unique de la tâche"},
+    "batch": {"type": "string", "default": "default"},
+    "branch": {"type": "string", "minLength": 1},
+    "base_branch": {"type": "string", "default": "main"},
+    "merge_strategy": {"enum": ["none", "auto_ff", "auto_no_ff"], "default": "none"},
+    "runner": {"enum": ["claude", "agy", "codex"], "default": "claude"},
+    "fallback_runner": {"enum": ["claude", "agy", "codex", "none"], "description": "Runner de repli si le nominal est en quota/indisponible ou évité (--avoid-runner) ; modèles transposés via [fallback_map]. Absent : l'autre runner si auto_fallback = true (défaut). none : aucun repli"},
+    "model": {"type": "string"},
+    "effort": {"enum": ["low", "medium", "high", "xhigh", "max"], "description": "Effort de raisonnement transmis au CLI (--effort) ; absent = défaut du CLI"},
+    "escalate": {"type": "boolean", "default": true},
+    "max_model": {"type": "string"},
+    "verify_cmd": {"type": "string", "default": ""},
+    "require_commit": {"type": "boolean", "default": true},
+    "allowed_tools": {"type": "array", "items": {"type": "string"}},
+    "max_turns": {"type": "integer", "minimum": 1, "default": 35},
+    "timeout_sec": {"type": "integer", "minimum": 1, "default": 900},
+    "max_budget_usd": {"type": ["number", "null"], "minimum": 0}
+  }
+}

@@ -1,0 +1,29 @@
+# Modèle de configuration par projet (copié/généré dans .agent-tasks/config.toml par `agent-runner init`).
+# Une configuration globale optionnelle peut vivre dans ~/.config/agent-task-runner/config.toml.
+main_branch = "main"
+default_runner = "claude"   # choisi par `agent-runner init` parmi les runners installés et connectés
+# runners = ["claude", "agy"]   # runners autorisés (défaut : tous) ; les autres sont traités comme indisponibles
+auto_fallback = true   # fiche sans fallback_runner : repli sur l'autre runner (`fallback_runner: none` l'interdit)
+default_verify_cmd = ""
+default_allowed_tools = [
+  "Bash(git:*)", "Bash(move-lines:*)", "Bash(ls:*)", "Bash(grep:*)",
+  "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)",
+]
+default_max_turns = 35
+default_timeout_sec = 900
+permission = "accept"   # "accept" (acceptEdits) ou "bypass" (--dangerously-skip-permissions)
+
+# Chaînes d'escalade, du modèle le moins cher au plus puissant.
+[escalation]
+claude = ["haiku", "sonnet", "opus", "fable"]
+agy    = [
+  "gemini-3.8-flash-medium",
+  "gemini-4-hydrogen-medium",
+  "gemini-4-argon-high",
+  "gemini-4-neon-high"
+]   # à adapter aux alias exacts (`agy models`)
+
+# Arguments CLI supplémentaires par runner.
+[extra_args]
+# claude = []
+# agy = []
