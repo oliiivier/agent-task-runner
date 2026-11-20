@@ -30,6 +30,17 @@ class RunRequest:
 
 
 @dataclass
+class WindowQuota:
+    """Fenêtre de consommation (session glissante, semaine, quota modèle)."""
+
+    name: str  # ex. "session (5h)", "semaine (7j)", "sonnet (7j)"
+    utilization: float  # pourcentage utilisé (0.0 à 100.0)
+    resets_at: str | None = None
+    reset_delay: str = ""  # ex. "2h15m", "3j 4h", "imminent"
+    reset_minutes: float | None = None  # minutes restantes avant reset
+
+
+@dataclass
 class AttemptResult:
     """Résultat normalisé d'une tentative (indépendant du fournisseur)."""
 
@@ -72,10 +83,23 @@ class Adapter:
     default_chain: list[str] = []
     requires_result = True  # C1 exige un événement/objet de résultat final
     supports_allowed_tools = False  # le CLI applique-t-il `allowed_tools` (liste blanche d'outils) ?
+    supports_max_turns = False  # le CLI applique-t-il ou permet-il d'appliquer max_turns ?
+    supports_max_budget = False  # le CLI supporte-t-il un plafond financier max_budget_usd ?
+    supports_timeout = True  # timeout surveillé par le runner
+    recommended_usage = ""
+    model_metadata: dict[str, dict[str, str]] = {}
     exclude: list[str] = []  # motifs fnmatch de modèles à ne jamais utiliser via ce CLI
 
     def __init__(self, exclude: list[str] | None = None) -> None:
         self.exclude = list(exclude or [])
+
+    def get_model_info(self, model: str) -> dict[str, str] | None:
+        """Retourne les métadonnées {'level', 'context', 'cost', 'desc'} pour un modèle ou None."""
+        return self.model_metadata.get(model)
+
+    def get_usage_windows(self) -> list[WindowQuota] | None:
+        """Fenêtres de consommation (session 5h, semaine 7j) si le fournisseur les expose."""
+        return None
 
     def build_command(self, req: RunRequest) -> list[str]:
         raise NotImplementedError

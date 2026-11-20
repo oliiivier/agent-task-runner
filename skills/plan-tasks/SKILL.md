@@ -12,7 +12,14 @@ Tu planifies ; tu n'exécutes pas. Chaque fiche sera exécutée plus tard par un
 1. **Séparation des rôles.** Ne modifie AUCUN fichier de code source. Si `.agent-tasks/` est absent, lance `agent-runner init`. Écris uniquement des fiches `.agent-tasks/todo/NN-slug.md` (numérotation à 2 chiffres, ordre = ordre d'exécution).
 2. **Tâches autonomes.** Le corps de chaque fiche contient l'extrait EXACT du plan, les numéros de lignes et les règles applicables à cette seule étape (`## Objectif`, `## Contexte extrait du plan (autonome — inutile de relire tout le plan)`). Une fiche précise permet à un modèle léger de réussir du premier coup.
 3. **Déplacements de code.** Si `move-lines` est disponible, ajoute `"Bash(move-lines:*)"` à `allowed_tools` et demande explicitement d'utiliser `move-lines <src> <début> <fin> <dst>` plutôt que de réécrire le code.
-4. **Runners disponibles et validation des modèles.** Lance `agent-runner models` avant de générer les fiches. Sa première ligne (`runners disponibles : …`) fait foi : n'écris dans `runner` et `fallback_runner` **que des runners disponibles** (installés, connectés et autorisés par `runners` dans `config.toml`). Si un seul est disponible, utilise-le partout, n'écris pas de `fallback_runner` vers le runner absent (`none` reste valable pour interdire le repli) et ignore les consignes propres à l'autre runner ; signale à l'utilisateur le runner indisponible et son motif. `model` et `max_model` doivent appartenir à la chaîne `[escalation]` du runner (sinon la fiche est rejetée). Pour `agy`, indique uniquement la **famille** (`gemini-4-argon`), `effort` compose la variante (`<famille>-<effort>`, ou l'effort disponible le plus proche — ex. `xhigh` devient `high` sur `argon`) ; n'écris jamais d'identifiant `claude-*` pour `agy` (quota très réduit).
+4. **Runners disponibles, capacités et validation des modèles.** Lance `agent-runner models` avant de générer les fiches.
+   - **Disponibilité :** Sa première ligne (`runners disponibles : …`) fait foi : n'écris dans `runner` et `fallback_runner` **que des runners disponibles** (installés, connectés et autorisés par `runners` dans `config.toml`). Si un seul est disponible, utilise-le partout, n'écris pas de `fallback_runner` vers le runner absent (`none` reste valable pour interdire le repli) et ignore les consignes propres à l'autre runner ; signale à l'utilisateur le runner indisponible et son motif.
+   - **Capacités, fenêtres d'usage et profils :** `agent-runner models` affiche pour chaque runner :
+     1. Ses **fenêtres d'usage en direct** : `session (5h)` et `semaine (7j)` (taux d'utilisation en % et délai avant reset). **Critère hautement discriminant** pour éviter les blocages immédiats (HTTP 429).
+     2. Ses **capacités fonctionnelles** : `allowed_tools`, `max_turns`, `max_budget`, `timeout`.
+     3. Son **usage recommandé** et les fiches par modèle (`[Niveau | Contexte | Coût] : description`).
+     Prends impérativement en compte ces données pour décider du runner et du modèle de chaque fiche (voir *Choisir le runner et le repli*).
+   - **Validation de chaîne :** `model` et `max_model` doivent appartenir à la chaîne `[escalation]` du runner (sinon la fiche est rejetée). Pour `agy`, indique uniquement la **famille** (`gemini-4-argon`), `effort` compose la variante (`<famille>-<effort>`, ou l'effort disponible le plus proche — ex. `xhigh` devient `high` sur `argon`) ; n'écris jamais d'identifiant `claude-*` pour `agy` (quota très réduit).
 5. **Vérification rapide et ciblée (`verify_cmd`).** Fixe un `verify_cmd` rapide et limité au module modifié (sauf passe finale globale ou audit), pour qu'un échec soit détecté vite et relayé au modèle supérieur sans ralentir chaque tentative. Un agent qui tourne en rond est coupé par `max_turns` (claude) ou `timeout_sec` (agy). La fiabilité de `verify_cmd` conditionne le niveau.
 6. **Un commit par tâche** (`require_commit: true`, message en anglais, format conventionnel), sauf baseline/audit (`require_commit: false`).
 7. **Cohérence de lot.** Regroupe les tâches dépendantes dans un même `batch` avec la même `branch` et fixe `merge_strategy` (`none`, `auto_ff`, `auto_no_ff`).
@@ -53,14 +60,56 @@ Tu planifies ; tu n'exécutes pas. Chaque fiche sera exécutée plus tard par un
 
 ## Choisir le runner et le repli
 
-- **`runner: claude`** (défaut, `fallback_runner: agy`) : édition chirurgicale, `move-lines`, boucles courtes compilation/test. Seul runner à appliquer `allowed_tools`, `max_turns` et `max_budget_usd`.
-- **`runner: agy`** (`fallback_runner: claude`) : lecture transverse multi-fichiers, documentation/audits, très large contexte. Comme `agy` ignore `allowed_tools` et `max_turns`, fixe toujours un `timeout_sec` serré dès qu'une tâche peut tourner sur `agy` (nominal ou repli). Un N3 `agy` démarre déjà au sommet de sa chaîne (`gemini-4-neon`) : sans escalade interne possible, `fallback_runner: claude` est indispensable.
-- **Repli systématique :** écris un `fallback_runner` explicite sur **toutes** les tâches qui le permettent (lisible dans `--dry-run`). Un champ absent vaut repli automatique sur l'autre runner (`auto_fallback = true`, défaut) : il ne protège donc rien. Pour les tâches exigeant une liste blanche d'outils stricte ou touchant à du code de sécurité critique, écris **`fallback_runner: none`**.
-- **Bascule dynamique et quotas :** en cas de saturation fournisseur à l'exécution, `agent-runner` marque le runner indisponible et bascule sur `fallback_runner` via `[fallback_map]` en conservant le travail partiel. Si l'utilisateur signale un quota bas avant lancement, garde le routage nominal dans les fiches et recommande `agent-runner run --avoid-runner <runner>` (n'inverse `runner`/`fallback_runner` dans les fiches que pour un choix permanent).
+Aligne le choix du runner sur les **fenêtres d'usage réelles** (session et semaine), les capacités fonctionnelles et la taille de contexte affichées par `agent-runner models` :
+
+### 1. Analyse discriminante des fenêtres d'utilisation (Session 5h & Semaine 7j)
+
+Examine en premier lieu la ligne `fenêtres d'usage` renvoyée par `agent-runner models` :
+- **Runner saturé ou en alerte (> 70-75%)** :
+  - Si la **session (5h)** ou la **semaine** d'un runner (souvent `claude`) dépasse **75%**, **ne planifie PAS les tâches sur ce runner**. Bascule le nominal vers l'autre runner (`runner: agy`, `fallback_runner: claude`) pour éviter le blocage immédiat à l'exécution (erreur HTTP 429).
+  - Si la fenêtre hebdomadaire est critique (> 85%), réserve impérativement le runner saturé aux seules micro-tâches chirurgicales impossibles sur l'autre runner.
+- **Répartition intelligente si marge disponible (< 70%)** :
+  - **Préservation de la session 5h de Claude** : délester systématiquement les tâches mécaniques N1 et la lecture/documentation vers `agy` (`gemini-3.8-flash`), afin de conserver le quota horaire et hebdomadaire de Claude pour les tâches complexes N2/N3.
+  - **Lots volumineux** : sur un lot de plus de 5 tâches, panache les runners selon la nature des tâches au lieu de tout router sur un seul fournisseur.
+
+### 2. Critères d'affectation technique du runner
+
+1. **`runner: claude` REQUIS (outillage strict ou boucle fermée)** :
+   - La tâche nécessite une liste blanche d'outils (`allowed_tools` non vide, ou `strict_allowed_tools = true` dans `config.toml`). Seul `claude` applique `allowed_tools`.
+   - La tâche nécessite un plafond strict de tours (`max_turns`) ou de budget (`max_budget_usd`) pour couper net d'éventuelles boucles de compilation/test.
+   - Édition chirurgicale fine avec `move-lines` et boucles courtes compilation/test.
+   - Tâche N3 sensible (sécurité, cryptographie, modifications critiques) nécessitant un confinement maximal.
+
+2. **`runner: agy` PRIVILÉGIÉ (large contexte ou économie de quotas)** :
+   - **Large contexte de lecture** : tâche nécessitant la lecture transverse de nombreux fichiers (> 3 fichiers), de la documentation complète, ou un audit de codebase (fenêtre 1M+ tokens évitant la saturation de contexte).
+   - **Économie de quotas Claude / FinOps** : délester les tâches mécaniques N1 (déplacements, renommage, documentation) vers `agy` (`gemini-3.8-flash` ou `gemini-4-hydrogen`) pour préserver les quotas de session/semaine de Claude.
+   - **`default_runner: agy`** configuré dans `.agent-tasks/config.toml` (respecte ce choix sauf si `allowed_tools` strict est exigé).
+   - *Rappel :* Comme `agy` ignore `allowed_tools` et `max_turns`, fixe toujours un `timeout_sec` serré dès qu'une tâche peut tourner sur `agy` (nominal ou repli). Un N3 `agy` démarre déjà au sommet de sa chaîne (`gemini-4-neon`) : sans escalade interne possible, `fallback_runner: claude` est indispensable.
+
+3. **`runner: codex` (optionnel)** :
+   - Exécution standard OpenAI si disponible, sans restriction d'outils, avec suivi approché de `max_turns`.
+
+4. **Arbitrage et runner par défaut :**
+   - Si les fenêtres d'usage le permettent et qu'aucun critère technique strict n'impose l'un plutôt que l'autre, prends en priorité le `default_runner` configuré dans `.agent-tasks/config.toml` (affiché par `agent-runner models`).
+
+### Repli systématique (`fallback_runner`)
+
+- Écris un `fallback_runner` explicite sur **toutes** les tâches qui le permettent (lisible dans `--dry-run`).
+- Un champ absent vaut repli automatique sur l'autre runner (`auto_fallback = true`, défaut).
+- Pour les tâches exigeant une liste blanche d'outils stricte ou touchant à du code de sécurité critique, écris impérativement **`fallback_runner: none`**.
+
+### Gestion des quotas et répartition
+
+- Si l'utilisateur exprime une contrainte de quota au moment du prompt (ex. *"préserve mon quota Claude"*, *"utilise Gemini pour les tâches simples"*), applique directement ce routage dans le champ `runner` des fiches.
+- En cas de saturation imprévue pendant l'exécution, `agent-runner` bascule dynamiquement sur `fallback_runner` via `[fallback_map]`. L'option `agent-runner run --avoid-runner <runner>` permet également d'éviter temporairement un runner saturé sans modifier les fiches.
 
 ## Format d'une fiche
 
-Champs autorisés uniquement (voir `templates/example-task.md` et `schemas/task.schema.json` du dépôt `agent-task-runner`) : `id`, `branch` (obligatoires) ; `batch`, `base_branch`, `merge_strategy`, `runner`, `fallback_runner`, `model`, `effort`, `escalate`, `max_model`, `verify_cmd`, `require_commit`, `allowed_tools`, `max_turns`, `timeout_sec`, `max_budget_usd` (optionnels).
+**Règle de routage dynamique (`level` par défaut) :**
+- Écris **`level: N1`**, **`level: N2`** ou **`level: N3`** dans le frontmatter et **omets `runner`, `model` et `max_model`** par défaut : `agent-runner` résoudra dynamiquement le couple runner/modèle au moment du `run` (et l'affichera dans `--dry-run`) selon `[routing.level_runner]`, les capacités requises et les fenêtres d'usage en direct.
+- **Ne pinne `runner: claude` (et éventuellement `model`/`max_model`) que si une contrainte réelle l'impose** : outillage restreint strict (`allowed_tools` + `strict_allowed_tools`), plafond financier (`max_budget_usd`), code de sécurité critique (`fallback_runner: none`), ou demande explicite de l'utilisateur.
+
+Champs autorisés uniquement (voir `templates/example-task.md` et `schemas/task.schema.json` du dépôt `agent-task-runner`) : `id`, `branch` (obligatoires) ; `batch`, `base_branch`, `merge_strategy`, `level`, `runner`, `fallback_runner`, `model`, `effort`, `escalate`, `max_model`, `verify_cmd`, `require_commit`, `allowed_tools`, `max_turns`, `timeout_sec`, `max_budget_usd` (optionnels).
 
 ```markdown
 ---
@@ -69,13 +118,8 @@ batch: split-reader
 branch: refactor/split-reader-screen
 base_branch: main
 merge_strategy: auto_no_ff
-# N1 : déplacement pur, vérifié par compilation
-runner: claude
-fallback_runner: agy
-model: haiku
-effort: low
-escalate: true
-max_model: sonnet
+# N1 : déplacement pur, vérifié par compilation (routé dynamiquement par `level`)
+level: N1
 max_turns: 20
 timeout_sec: 600
 verify_cmd: "tools/check-android.sh :feature:reader:compileDebugKotlin"
@@ -94,4 +138,4 @@ allowed_tools:
 
 ## Fin
 
-Termine par un tableau des fiches créées : id, niveau (avec le critère qui l'a fixé), `runner → fallback_runner`, `model`/`effort → max_model`. Propose ensuite `agent-runner run --dry-run` (qui affiche le runner effectif et la chaîne de chaque tâche), puis `agent-runner run` (avec `--avoid-runner <runner>` si l'utilisateur a signalé un quota bas).
+Termine par un tableau des fiches créées : id, `level` (avec le critère qui l'a fixé), `runner` (`auto` si routé par `level`, ou runner épinglé) et `fallback_runner`. Propose ensuite `agent-runner run --dry-run` (qui affiche la résolution dynamique runner/modèle et sa raison pour chaque tâche), puis `agent-runner run`.

@@ -65,6 +65,13 @@ DEFAULTS: dict = {
                    "gemini-4-neon": "opus"},
     },
     "extra_args": {},
+    "routing": {
+        "level_runner": {"N1": "agy", "N2": "agy", "N3": "claude"},
+        "quota_threshold": {"claude": 80.0, "agy": 80.0, "codex": 80.0},
+        "reset_grace_min": 20,
+        "usage_refresh_sec": 300,
+        "usage_refresh_tasks": 5,
+    },
 }
 
 
@@ -202,8 +209,9 @@ def load_config(root: Path) -> dict:
 # -------------------------------------------------------------------------- Task
 MERGE_STRATEGIES = ("none", "auto_ff", "auto_no_ff")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+LEVELS = ("N1", "N2", "N3")
 FIELDS = {
-    "id", "batch", "branch", "base_branch", "merge_strategy", "runner", "fallback_runner", "model",
+    "id", "batch", "branch", "base_branch", "merge_strategy", "level", "runner", "fallback_runner", "model",
     "effort", "escalate", "max_model", "verify_cmd", "require_commit", "allowed_tools", "max_turns",
     "timeout_sec", "max_budget_usd",
 }
@@ -218,7 +226,9 @@ class Task:
     batch: str = "default"
     base_branch: str = "main"
     merge_strategy: str = "none"
+    level: str | None = None
     runner: str = "claude"
+    runner_pinned: bool = False
     fallback_runner: str | None = None
     fallback_auto: bool = False  # repli déduit (champ absent + auto_fallback), pas écrit dans la fiche
     model: str | None = None
@@ -261,6 +271,15 @@ def parse_task(path: Path, cfg: dict) -> Task:
             tools = list(cfg["default_allowed_tools"])
         elif not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
             raise ValueError("allowed_tools : liste de chaînes attendue")
+        level = get("level", None, str)
+        if level is not None and level not in LEVELS:
+            raise ValueError(f"level : {level!r} (attendu : {', '.join(LEVELS)})")
+        runner_pinned = meta.get("runner") is not None
+        default_r = cfg["default_runner"]
+        if not runner_pinned and level:
+            lvl_r = cfg.get("routing", {}).get("level_runner", {}).get(level)
+            if lvl_r in ADAPTERS:
+                default_r = lvl_r
         task = Task(
             path=path,
             id=str(get("id", "", str)),
@@ -269,7 +288,9 @@ def parse_task(path: Path, cfg: dict) -> Task:
             batch=get("batch", "default", str),
             base_branch=get("base_branch", cfg["main_branch"], str),
             merge_strategy=get("merge_strategy", "none", str),
-            runner=get("runner", cfg["default_runner"], str),
+            level=level,
+            runner=get("runner", default_r, str),
+            runner_pinned=runner_pinned,
             fallback_runner=get("fallback_runner", None, str),
             model=get("model", None, str),
             effort=get("effort", None, str),
@@ -332,6 +353,30 @@ def map_model(model: str | None, src: list[str], dst: list[str], explicit: dict 
     return dst[min(len(dst) - 1, int(rank + 0.5))]
 
 
+def level_models(level: str | None, runner: str, cfg: dict) -> tuple[str | None, str | None, str | None]:
+    """Retourne (model, max_model, effort_defaut) sur `runner` pour un niveau N1/N2/N3."""
+    if not level:
+        return None, None, None
+    chain = cfg["escalation"].get(runner) or []
+    if not chain:
+        return None, None, None
+    adapter = adapter_for(runner, cfg)
+    efforts = {"N1": "low", "N2": "medium", "N3": "high"}
+    effort = efforts.get(level)
+    matching = [m for m in chain if (adapter.get_model_info(m) or {}).get("level", "").startswith(level)]
+    if matching:
+        start = matching[0]
+        idx = chain.index(start)
+        end = chain[min(idx + 1, len(chain) - 1)]
+        return start, end, effort
+    if level == "N1":
+        return chain[0], chain[min(1, len(chain) - 1)], effort
+    if level == "N2":
+        mid = len(chain) // 2
+        return chain[mid], chain[min(mid + 1, len(chain) - 1)], effort
+    return chain[-1], chain[-1], effort
+
+
 def candidate_models(task: Task, cfg: dict, forced: str | None, no_escalate: bool,
                      runner: str | None = None, start: str | None = None) -> list[str]:
     """Chaîne de modèles à essayer pour `task` sur `runner` (par défaut son runner nominal).
@@ -344,7 +389,11 @@ def candidate_models(task: Task, cfg: dict, forced: str | None, no_escalate: boo
     if not chain:
         raise Fail(f"aucune chaîne d'escalade définie pour le runner {runner!r}")
     model, max_model = task.model, task.max_model
-    if runner != task.runner:
+    if task.level and not model:
+        lvl_model, lvl_max, _ = level_models(task.level, runner, cfg)
+        model = lvl_model
+        max_model = max_model or lvl_max
+    elif runner != task.runner:
         src = cfg["escalation"].get(task.runner) or []
         explicit = cfg.get("fallback_map", {}).get(runner)
         model, max_model, forced = (map_model(m, src, chain, explicit) for m in (model, max_model, forced))
@@ -362,6 +411,148 @@ def pick_runner(task: Task, unavailable: set[str], avoid: set[str]) -> str:
     if alt and alt not in unavailable and (task.runner in unavailable or (task.runner in avoid and alt not in avoid)):
         return alt
     return task.runner
+
+
+def check_runner_quota(runner: str, windows: list | None, cfg: dict) -> tuple[bool, str]:
+    """Évalue si un runner dépasse son seuil de quota.
+
+    Prend le max sur les fenêtres non relâchées. Un reset imminent (<= reset_grace_min)
+    avec utilisation < 95% relâche la contrainte sur cette fenêtre.
+    """
+    if not windows:
+        return False, "usage inconnu"
+    routing_cfg = cfg.get("routing", {})
+    threshold = float(routing_cfg.get("quota_threshold", {}).get(runner, 80.0))
+    grace_min = float(routing_cfg.get("reset_grace_min", 20.0))
+    active = []
+    relaxed = False
+    for w in windows:
+        if w.reset_minutes is not None and w.reset_minutes <= grace_min and w.utilization < 95.0:
+            relaxed = True
+            continue
+        active.append(w)
+    if not active:
+        return False, "reset imminent" if relaxed else "usage inconnu"
+    max_w = max(active, key=lambda w: w.utilization)
+    if max_w.utilization >= threshold:
+        return True, f"{max_w.name} {max_w.utilization:.0f}% >= {threshold:.0f}%"
+    return False, f"{max_w.name} {max_w.utilization:.0f}%"
+
+
+def resolve_task_routing(
+    task: Task,
+    cfg: dict,
+    unavailable: set[str],
+    usage_snapshot: dict[str, list | None],
+    avoid: set[str],
+    preference_order: list[str],
+) -> tuple[str, str]:
+    """Résout (runner_effectif, raison) de façon pure.
+
+    Ordre :
+    1. Filtre sur les capacités dures (strict_allowed_tools, max_budget_usd).
+    2. Runner épinglé (`runner:` explicite) ou préférence par niveau (`[routing.level_runner]`) / défaut.
+    3. Seuils de fenêtres d'usage (ignoré si usage indisponible ou runner épinglé).
+    """
+    candidates = [r for r in preference_order if r not in unavailable and r not in avoid]
+    needs_tools = bool(cfg.get("strict_allowed_tools") and task.allowed_tools)
+    needs_budget = task.max_budget_usd is not None
+    hard_capable = [
+        r for r in candidates
+        if (not needs_tools or adapter_for(r, cfg).supports_allowed_tools)
+        and (not needs_budget or adapter_for(r, cfg).supports_max_budget)
+    ]
+    pool = hard_capable if hard_capable else candidates
+
+    if task.runner_pinned or not task.level:
+        base_reason = "pin" if task.runner_pinned else "défaut"
+        if task.runner in pool:
+            if not task.runner_pinned:
+                over, quota_note = check_runner_quota(task.runner, usage_snapshot.get(task.runner), cfg)
+                if over and task.fallback_runner and task.fallback_runner in pool:
+                    alt_over, _ = check_runner_quota(task.fallback_runner, usage_snapshot.get(task.fallback_runner), cfg)
+                    if not alt_over:
+                        return task.fallback_runner, f"{base_reason}, bascule ({task.runner}: {quota_note})"
+                if quota_note == "usage inconnu":
+                    return task.runner, f"{base_reason}, usage inconnu"
+            return task.runner, base_reason
+        if task.runner in candidates and not hard_capable:
+            return task.runner, base_reason
+        if needs_tools and not adapter_for(task.runner, cfg).supports_allowed_tools and pool:
+            return pool[0], "contrainte allowed_tools"
+        if needs_budget and not adapter_for(task.runner, cfg).supports_max_budget and pool:
+            return pool[0], "contrainte budget"
+        alt = task.fallback_runner
+        if alt and alt in pool:
+            return alt, f"repli ({task.runner} indisponible)"
+        return task.runner, "indisponible"
+
+    level_pref = (
+        cfg.get("routing", {}).get("level_runner", {}).get(task.level)
+        if task.level else cfg.get("default_runner")
+    )
+    if level_pref in pool:
+        preferred = level_pref
+        base_reason = f"niveau {task.level}" if task.level else "défaut"
+    elif pool:
+        preferred = pool[0]
+        if needs_tools and level_pref and not adapter_for(level_pref, cfg).supports_allowed_tools:
+            base_reason = "contrainte allowed_tools"
+        elif needs_budget and level_pref and not adapter_for(level_pref, cfg).supports_max_budget:
+            base_reason = "contrainte budget"
+        else:
+            base_reason = f"{level_pref} indisponible -> {preferred}"
+    else:
+        return task.runner, "indisponible"
+
+    over, quota_note = check_runner_quota(preferred, usage_snapshot.get(preferred), cfg)
+    if over:
+        for alt in pool:
+            if alt == preferred:
+                continue
+            alt_over, _ = check_runner_quota(alt, usage_snapshot.get(alt), cfg)
+            if not alt_over:
+                return alt, f"{base_reason}, bascule ({preferred}: {quota_note})"
+        return preferred, f"{base_reason} ({quota_note}, sans alternative)"
+    if quota_note == "usage inconnu":
+        return preferred, f"{base_reason}, usage inconnu"
+    return preferred, base_reason
+
+
+class UsageCache:
+    """Cliché d'usage avec rafraîchissement paresseux (temps, N tâches ou erreur de quota)."""
+
+    def __init__(self, cfg: dict, runners: list[str], status: dict[str, str | None]) -> None:
+        self.cfg = cfg
+        self.runners = [r for r in runners if not status.get(r)]
+        routing_cfg = cfg.get("routing", {})
+        self.min_interval = float(routing_cfg.get("usage_refresh_sec", 300))
+        self.task_interval = int(routing_cfg.get("usage_refresh_tasks", 5))
+        self.snapshot: dict[str, list | None] = {}
+        self.last_fetch: float = 0.0
+        self.tasks_since_fetch: int = 0
+        self.refresh(force=True)
+
+    def refresh(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force:
+            if (now - self.last_fetch) < self.min_interval or self.tasks_since_fetch < self.task_interval:
+                return
+        for r in self.runners:
+            try:
+                self.snapshot[r] = adapter_for(r, self.cfg).get_usage_windows()
+            except Exception:
+                self.snapshot[r] = None
+        self.last_fetch = now
+        self.tasks_since_fetch = 0
+
+    def on_task_done(self, quota_hit: bool = False) -> None:
+        self.tasks_since_fetch += 1
+        if quota_hit:
+            if (time.monotonic() - self.last_fetch) >= min(30.0, self.min_interval):
+                self.refresh(force=True)
+        else:
+            self.refresh(force=False)
 
 
 def load_queue(tasks_dir: Path, cfg: dict, batch: str | None) -> list[Task]:
@@ -551,16 +742,21 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
     partial = git("status", "--short", cwd=root).stdout.strip() if is_dirty else ""
 
     unavailable: set[str] = args.unavailable  # partagé entre tâches : un quota atteint vaut pour la suite
-    runner = pick_runner(task, unavailable, set(args.avoid_runner or []))
-    if runner in unavailable:
+    all_unavailable = unavailable | {r for r, why in getattr(args, "status", {}).items() if why}
+    runner, routing_reason = resolve_task_routing(
+        task, cfg, all_unavailable, args.usage_cache.snapshot,
+        set(args.avoid_runner or []), args.preference,
+    )
+    if runner in all_unavailable:
         raise Fail(f"{task.id} : runner {runner!r} indisponible (quota ou exécutable absent) et aucun "
                    "fallback_runner utilisable")
+    effective_effort = task.effort or (level_models(task.level, runner, cfg)[2] if task.level else None)
     queue = candidate_models(task, cfg, args.model, args.no_escalate, runner)
     attempts: list[dict] = []
     prev: dict | None = None
     note = f" (repli de {task.runner})" if runner != task.runner else ""
     print(_ansi("1", f"=== {progress}{task.id}") + _ansi("2", f" [{task.batch}] branche {task.branch}")
-          + f" — {_ansi('32', runner)}{note} : {' -> '.join(queue)}")
+          + f" — {_ansi('32', runner)}{note} [{routing_reason}] : {' -> '.join(queue)}")
 
     k = 0
     while queue:
@@ -570,7 +766,7 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
             print(_ansi("36", f"    escalade {prev['model']} -> {model}"))
         adapter = adapter_for(runner, cfg)
         try:
-            model_id = adapter.resolve_model(model, task.effort, args.catalogs.get(runner))
+            model_id = adapter.resolve_model(model, effective_effort, args.catalogs.get(runner))
         except ValueError as exc:
             raise Fail(f"{task.id} : {exc}") from exc
         safe = re.sub(r"[^\w.-]", "_", f"{runner}-{model_id}" if runner != task.runner else model_id)
@@ -579,10 +775,10 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
             prompt=build_prompt(task, root, k, prev, partial if k == 1 else "", head_before),
             model=model_id, cwd=root, allowed_tools=task.allowed_tools, max_turns=task.max_turns,
             timeout_sec=task.timeout_sec, max_budget_usd=task.max_budget_usd,
-            permission_mode=cfg["permission"], effort=task.effort,
+            permission_mode=cfg["permission"], effort=effective_effort,
             extra_args=list(cfg.get("extra_args", {}).get(runner, [])),
         )
-        shown = model_id if model_id != model else model + (f" (effort {task.effort})" if task.effort else "")
+        shown = model_id if model_id != model else model + (f" (effort {effective_effort})" if effective_effort else "")
         print(f"    tentative {k} : {_ansi('1', f'{runner} {shown}')} ...", flush=True)
         untracked_before = untracked(root)
         res = adapter.run(req, Path(f"{log_base}.log"), Path(f"{log_base}.json"))
@@ -613,6 +809,7 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
         if status == "quota":
             # Le fournisseur est saturé : inutile d'escalader chez lui. On bascule sur le repli en
             # reprenant au rang équivalent, et on le marque indisponible pour les tâches suivantes.
+            args.last_quota_hit = True
             unavailable.add(runner)
             alt = task.fallback_runner if task.fallback_runner not in unavailable else None
             if alt is None or runner == alt:
@@ -740,7 +937,7 @@ def check_models(cfg: dict, tasks: list[Task], catalogs: dict) -> None:
 
 
 def cmd_models(args) -> int:
-    """Affiche, par runner, la chaîne configurée et le catalogue réellement disponible."""
+    """Affiche, par runner, la chaîne configurée, les capacités et le catalogue réellement disponible."""
     try:
         cfg = load_config(repo_root())
     except Fail:
@@ -756,22 +953,55 @@ def cmd_models(args) -> int:
     for runner in runners:
         adapter = adapter_for(runner, cfg)
         chain = cfg["escalation"].get(runner) or []
-        print(_ansi("1;36", f"[{runner}]") + f" chaîne : {' -> '.join(chain) or '-'}")
+        disp_status = _ansi("32", "(disponible)") if not status[runner] else _ansi("33", "(indisponible)")
+        print(_ansi("1;36", f"[{runner}]") + f" {disp_status}")
+        windows = None
+        try:
+            windows = adapter.get_usage_windows()
+        except Exception:
+            pass
+        if windows:
+            parts = []
+            for w in windows:
+                color = "32" if w.utilization < 50 else ("33" if w.utilization < 80 else "1;31")
+                reset_info = f" (reset dans {w.reset_delay})" if w.reset_delay else ""
+                parts.append(f"{w.name}: {_ansi(color, f'{w.utilization:.0f}%')}{reset_info}")
+            print(_ansi("1;35", "  fenêtres d'usage : ") + " | ".join(parts))
+        else:
+            print(_ansi("2", "  fenêtres d'usage : non disponible (nécessite un compte OAuth connecté)"))
+        tools_st = "oui" if adapter.supports_allowed_tools else "non"
+        turns_st = "oui" if adapter.supports_max_turns and runner == "claude" else ("partiel" if runner == "codex" else "non")
+        budget_st = "oui" if adapter.supports_max_budget else "non"
+        print(_ansi("2", f"  capacités        : allowed_tools: {tools_st} | max_turns: {turns_st} | max_budget: {budget_st} | timeout: oui"))
+        if adapter.recommended_usage:
+            print(_ansi("2", f"  usage recommandé : {adapter.recommended_usage}"))
+        print(f"  chaîne           : {' -> '.join(chain) or '-'}")
         if adapter.exclude:
-            print(_ansi("2", f"  exclus : {', '.join(adapter.exclude)}"))
+            print(_ansi("2", f"  exclus           : {', '.join(adapter.exclude)}"))
         if status[runner]:
-            print(_ansi("33", f"  indisponible : {status[runner]}"))
-            continue
+            print(_ansi("33", f"  motif indispo    : {status[runner]}"))
+        if chain:
+            print(_ansi("2", "  modèles configurés :"))
+            for m in chain:
+                info = adapter.get_model_info(m)
+                if info:
+                    meta = _ansi("2", f"[{info['level']:<4} | {info['context']:<4} | {info['cost']:<4}]")
+                    desc = info.get("desc", "")
+                    print(f"    * {m:<18} {meta} {desc}")
+                else:
+                    print(f"    * {m}")
         catalog = catalogs.get(runner)
-        if catalog is None:
+        if catalog is not None:
+            print(_ansi("2", f"  catalogue ({runner} models) :"))
+            for family, efforts in catalog.items():
+                mark = _ansi("32", "*") if family in chain else " "
+                print(f"  {mark} {family:<34} {_ansi('2', ', '.join(efforts) or '(sans effort)')}")
+            for m in chain:
+                if not in_catalog(m, catalog):
+                    print(_ansi("1;31", f"  ! {m} : absent du catalogue"))
+        elif not status[runner]:
             print(_ansi("2", "  (pas de catalogue exposé par le CLI : alias de la chaîne utilisés tels quels)"))
-            continue
-        for family, efforts in catalog.items():
-            mark = _ansi("32", "*") if family in chain else " "
-            print(f"  {mark} {family:<34} {_ansi('2', ', '.join(efforts) or '(sans effort)')}")
-        for m in chain:
-            if not in_catalog(m, catalog):
-                print(_ansi("1;31", f"  ! {m} : absent du catalogue"))
+        print()
     return 0
 
 
@@ -797,11 +1027,15 @@ def print_dry_run(tasks: list[Task], cfg: dict, args, status: dict[str, str | No
     print(_ansi("1", f"Plan d'exécution : {len(tasks)} tâche(s)"))
     name_w = min(max(len(t.path.name) for t in tasks), 36)
     last_group: tuple[str, str, str, str] | None = None
+    all_unavailable = args.unavailable | {r for r, why in status.items() if why}
     for t in tasks:
-        runner = pick_runner(t, args.unavailable, avoid)
+        runner, routing_reason = resolve_task_routing(
+            t, cfg, all_unavailable, args.usage_cache.snapshot, avoid, args.preference
+        )
         adapter = adapter_for(runner, cfg)
+        effective_effort = t.effort or (level_models(t.level, runner, cfg)[2] if t.level else None)
         try:
-            chain = [adapter.resolve_model(m, t.effort, args.catalogs.get(runner))
+            chain = [adapter.resolve_model(m, effective_effort, args.catalogs.get(runner))
                      for m in candidate_models(t, cfg, args.model, args.no_escalate, runner)]
         except ValueError as exc:
             raise Fail(f"{t.id} : {exc}") from exc
@@ -816,6 +1050,7 @@ def print_dry_run(tasks: list[Task], cfg: dict, args, status: dict[str, str | No
             notes.append(_ansi("2", f"(repli {'auto ' if t.fallback_auto else ''}{t.fallback_runner})"))
         elif runner != t.runner:
             notes.append(_ansi("2", f"(au lieu de {t.runner}{', repli auto' if t.fallback_auto else ''})"))
+        notes.append(_ansi("2", f"[{routing_reason}]"))
         if runner in args.unavailable:
             notes.append(_ansi("1;31", f"[INDISPONIBLE : {status[runner]}]"))
         if t.allowed_tools:
@@ -826,8 +1061,10 @@ def print_dry_run(tasks: list[Task], cfg: dict, args, status: dict[str, str | No
         suffix = ("  " + " ".join(notes)) if notes else ""
         print(f"  {t.path.name:<{name_w}}  {_ansi('32', f'{runner:<6}')}  {' -> '.join(chain)}{suffix}")
         meta = []
-        if t.effort:
-            meta.append(f"effort={t.effort}")
+        if t.level:
+            meta.append(f"level={t.level}")
+        if effective_effort:
+            meta.append(f"effort={effective_effort}")
         meta.append(f"max_turns={t.max_turns}")
         if t.timeout_sec != cfg["default_timeout_sec"]:
             meta.append(f"timeout={t.timeout_sec}s")
@@ -849,6 +1086,8 @@ def cmd_run(args) -> int:
     used = {t.runner for t in tasks} | {t.fallback_runner for t in tasks if t.fallback_runner}
     preference = enabled_runners(cfg)  # ordre de `runners` = préférence pour le repli automatique
     status, args.catalogs = probe_runners(cfg, used | set(preference))
+    args.status = status
+    args.preference = preference
     args.unavailable = {r for r, why in status.items() if why and r in used}
     for t in tasks:  # repli automatique : premier autre runner réellement utilisable
         if t.fallback_auto:
@@ -861,8 +1100,11 @@ def cmd_run(args) -> int:
     apply_strict_allowed_tools(cfg, tasks)
     validate_queue(root, cfg, tasks)
     check_fallback_map(cfg, tasks, args.catalogs)
+    args.usage_cache = UsageCache(cfg, preference, status)
+    all_unavailable = args.unavailable | {r for r, why in status.items() if why}
     if cfg.get("permission") != "bypass" and any(
-        pick_runner(t, args.unavailable, avoid) == "agy" and t.require_commit for t in tasks
+        resolve_task_routing(t, cfg, all_unavailable, args.usage_cache.snapshot, avoid, preference)[0] == "agy"
+        and t.require_commit for t in tasks
     ):
         print(_ansi("33", 'avertissement : agy avec permission = "accept" bloque les commandes shell '
                     '(git commit) sans règles permissions.allow dans settings.json ; utiliser '
@@ -873,8 +1115,8 @@ def cmd_run(args) -> int:
     if git("check-ignore", "-q", TASKS_DIR, cwd=root, check=False).returncode != 0:
         raise Fail(".agent-tasks n'est pas ignoré par Git : relancer `agent-runner init`")
     for t in tasks:
-        runner = pick_runner(t, args.unavailable, avoid)
-        if runner in args.unavailable:
+        runner, _ = resolve_task_routing(t, cfg, all_unavailable, args.usage_cache.snapshot, avoid, preference)
+        if runner in all_unavailable:
             raise Fail(f"{t.id} : runner {runner} indisponible ({status[runner]}) "
                        "et aucun repli disponible (fallback_runner: none, auto_fallback = false "
                        "ou runner de repli lui aussi indisponible)")
@@ -885,8 +1127,11 @@ def cmd_run(args) -> int:
     try:
         total = len(tasks)
         for i, task in enumerate(tasks):
-            if execute_task(root, cfg, task, args, allow_dirty=args.resume and i == 0,
-                            progress=f"[{i + 1}/{total}] "):
+            args.last_quota_hit = False
+            ok = execute_task(root, cfg, task, args, allow_dirty=args.resume and i == 0,
+                              progress=f"[{i + 1}/{total}] ")
+            args.usage_cache.on_task_done(quota_hit=args.last_quota_hit)
+            if ok:
                 completed.append(task)
             else:
                 failed.append(task)
@@ -1006,6 +1251,22 @@ strict_allowed_tools = false   # true : pas de repli auto vers un runner qui ign
 # claude = []
 # agy = []
 # codex = []
+
+# Routage dynamique par niveau (fiches avec `level: N1|N2|N3` sans `runner` épinglé) et seuils de quota.
+[routing.level_runner]
+N1 = "agy"
+N2 = "agy"
+N3 = "claude"
+
+[routing.quota_threshold]
+claude = 80.0
+agy = 80.0
+codex = 80.0
+
+[routing]
+reset_grace_min = 20       # relâche le seuil si le reset est imminent (<= N min) et quota < 95%
+usage_refresh_sec = 300    # intervalle minimal (s) entre deux interrogations de quota en cours de run
+usage_refresh_tasks = 5    # rafraîchissement paresseux toutes les N tâches
 """
 
 
@@ -1090,6 +1351,41 @@ def inject_rules(path: Path, create: bool) -> bool:
     return True
 
 
+def update_config_file(cfg_path: Path) -> list[str]:
+    """Ajoute les sections `[routing*]` manquantes dans un config.toml existant sans écraser l'existant."""
+    text = cfg_path.read_text()
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise Fail(f"{cfg_path} : TOML invalide : {exc}") from exc
+    routing = parsed.get("routing") if isinstance(parsed.get("routing"), dict) else {}
+    added: list[str] = []
+    chunks: list[str] = []
+    if "level_runner" not in routing:
+        added.append("routing.level_runner")
+        chunks.append(
+            "\n# Routage dynamique par niveau (fiches avec `level: N1|N2|N3` sans `runner` épinglé)\n"
+            "[routing.level_runner]\nN1 = \"agy\"\nN2 = \"agy\"\nN3 = \"claude\"\n"
+        )
+    if "quota_threshold" not in routing:
+        added.append("routing.quota_threshold")
+        chunks.append(
+            "\n[routing.quota_threshold]\nclaude = 80.0\nagy = 80.0\ncodex = 80.0\n"
+        )
+    if not any(k in routing for k in ("reset_grace_min", "usage_refresh_sec", "usage_refresh_tasks")):
+        added.append("routing")
+        chunks.append(
+            "\n[routing]\n"
+            "reset_grace_min = 20       # relâche le seuil si le reset est imminent (<= N min) et quota < 95%\n"
+            "usage_refresh_sec = 300    # intervalle minimal (s) entre deux interrogations de quota en cours de run\n"
+            "usage_refresh_tasks = 5    # rafraîchissement paresseux toutes les N tâches\n"
+        )
+    if chunks:
+        sep = "" if not text or text.endswith("\n") else "\n"
+        cfg_path.write_text(text + sep + "".join(chunks))
+    return added
+
+
 def cmd_init(args) -> int:
     root = repo_root()
     base = root / TASKS_DIR
@@ -1118,6 +1414,12 @@ def cmd_init(args) -> int:
         verify, tools = detect_stack(root)
         cfg_path.write_text(render_config(main, verify, tools, default_runner or "claude"))
         print(f"config.toml généré (default_runner : {default_runner or 'claude'}, verify par défaut : {verify or '-'})")
+    elif args.update_config:
+        added = update_config_file(cfg_path)
+        if added:
+            print(f"config.toml complété ({', '.join(added)})")
+        else:
+            print("config.toml déjà à jour")
     if args.with_agent_rules:
         inject_rules(root / "CLAUDE.md", create=True)
         inject_rules(root / "AGENTS.md", create=False)
@@ -1275,6 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("init", help="initialise .agent-tasks/ dans le dépôt courant")
     p.add_argument("--gitignore", action="store_true", help="utilise .gitignore au lieu de .git/info/exclude")
     p.add_argument("--with-agent-rules", action="store_true", help="ajoute les consignes à CLAUDE.md / AGENTS.md")
+    p.add_argument("--update-config", action="store_true", help="complète un config.toml existant avec les nouvelles sections")
     p.set_defaults(func=cmd_init)
     p = sub.add_parser("run", help="exécute les tâches de .agent-tasks/todo/")
     p.add_argument("--batch", help="ne traite que ce lot")

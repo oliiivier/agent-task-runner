@@ -10,17 +10,90 @@ restent à 0 et seuls le code retour et `is_error` décident du succès (C1).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 
-from .base import Adapter, AttemptResult, RunRequest
+from .base import Adapter, AttemptResult, RunRequest, WindowQuota
 
 EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
 _SUFFIX = re.compile(r"^(?P<family>.+)-(?P<effort>" + "|".join(EFFORT_LEVELS) + r")$")
 DEFAULT_EFFORT = "medium"
 _MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._]*-[a-z0-9._-]+")
 HEADLESS_DENIED_RE = re.compile(r"headless mode cannot prompt for, so it was auto-denied", re.IGNORECASE)
+
+
+def _parse_agy_delay(reset_str: str | None) -> tuple[str, float | None]:
+    if not reset_str:
+        return "", None
+    try:
+        clean = reset_str.strip().replace("Z", "+00:00")
+        if "T" in clean:
+            target = datetime.fromisoformat(clean)
+            diff = (target - datetime.now(timezone.utc)).total_seconds()
+        else:
+            dt_part = clean.rsplit(" ", 1)[0]
+            target = datetime.strptime(dt_part, "%Y-%m-%d %H:%M")
+            diff = (target - datetime.now()).total_seconds()
+
+        mins = max(0.0, diff / 60.0)
+        if diff <= 0:
+            return "imminent", 0.0
+        if diff < 3600:
+            return f"{int(diff // 60)}m", mins
+        if diff < 86400:
+            h = int(diff // 3600)
+            m = int((diff % 3600) // 60)
+            return f"{h}h{m:02d}m", mins
+        days = int(diff // 86400)
+        h = int((diff % 86400) // 3600)
+        return f"{days}j {h}h", mins
+    except Exception:
+        return "", None
+
+
+def parse_agy_usage(text: str) -> list[WindowQuota]:
+    """Parse la sortie de `agy --print /usage` (séparation par tabulations ou espaces)."""
+    windows: dict[str, WindowQuota] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("quota:"):
+            continue
+
+        # Essai par tabulation
+        tokens = [t.strip() for t in line.split("\t") if t.strip()]
+        # Repli si colonnes séparées par 2+ espaces
+        if len(tokens) < 4:
+            parts = [p.strip() for p in re.split(r"\s{2,}", line) if p.strip()]
+            if len(parts) >= 4:
+                tokens = parts
+
+        if len(tokens) < 4:
+            continue
+
+        grp, lim, pct_str, reset_str = tokens[0].lower(), tokens[1].lower(), tokens[2].rstrip("%"), tokens[3]
+        try:
+            rem_pct = float(pct_str)
+        except ValueError:
+            continue
+        used_pct = max(0.0, min(100.0, 100.0 - rem_pct))
+        delay, mins = _parse_agy_delay(reset_str)
+
+        if "gemini models" in grp:
+            if "five hour" in lim:
+                windows["session"] = WindowQuota("session (5h)", used_pct, reset_str, delay, mins)
+            elif "weekly" in lim:
+                windows["weekly"] = WindowQuota("semaine (7j)", used_pct, reset_str, delay, mins)
+        elif "gemini 4 argon" in grp and "weekly" in lim:
+            windows["argon"] = WindowQuota("argon (7j)", used_pct, reset_str, delay, mins)
+
+    ordered: list[WindowQuota] = []
+    for k in ("session", "weekly", "argon"):
+        if k in windows:
+            ordered.append(windows[k])
+    return ordered
 
 
 def split_model_id(model_id: str) -> tuple[str, str | None]:
@@ -99,6 +172,61 @@ class AgyAdapter(Adapter):
     # Familles du moins cher au plus puissant ; l'effort est ajouté en suffixe (`<famille>-<effort>`).
     default_chain = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon", "gemini-4-neon"]
     requires_result = False
+    supports_allowed_tools = False
+    supports_max_turns = False
+    supports_max_budget = False
+    recommended_usage = "lecture transverse multi-fichiers, très large contexte (1M+), audits, économie de quota"
+    model_metadata = {
+        "gemini-3.8-flash": {
+            "level": "N1",
+            "context": "1M+",
+            "cost": "$",
+            "desc": "rapide, économique, grand contexte, doc/audits, mécanique",
+        },
+        "gemini-4-hydrogen": {
+            "level": "N1/N2",
+            "context": "1M+",
+            "cost": "$",
+            "desc": "rapide, logique locale simple à modérée",
+        },
+        "gemini-4-argon": {
+            "level": "N2",
+            "context": "1M+",
+            "cost": "$$",
+            "desc": "logique avancée, refactor transverse multi-fichiers",
+        },
+        "gemini-4-neon": {
+            "level": "N3",
+            "context": "1M+",
+            "cost": "$$$",
+            "desc": "raisonnement frontière, diagnostic, invariants complexes",
+        },
+    }
+
+    def get_model_info(self, model: str) -> dict[str, str] | None:
+        family, _ = split_model_id(model)
+        return self.model_metadata.get(family) or self.model_metadata.get(model)
+
+    def get_usage_windows(self) -> list[WindowQuota] | None:
+        mock = os.environ.get("FAKE_AGY_USAGE")
+        if mock:
+            try:
+                data = json.loads(mock)
+                return [WindowQuota(**item) for item in data]
+            except Exception:
+                pass
+        try:
+            proc = subprocess.run(
+                [self.executable, "--print", "/usage"],
+                capture_output=True, text=True, timeout=12
+            )
+            if proc.returncode == 0 and proc.stdout:
+                parsed = parse_agy_usage(proc.stdout)
+                if parsed:
+                    return parsed
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return None
 
     def list_models(self) -> dict[str, list[str]] | None:
         try:

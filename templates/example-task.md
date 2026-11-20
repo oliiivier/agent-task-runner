@@ -8,15 +8,16 @@ branch: refactor/example
 base_branch: main
 # none | auto_ff | auto_no_ff
 merge_strategy: none
-# Chaîne d'escalade : on démarre sur `model` et on monte en cas d'échec, jusqu'à `max_model`
-runner: claude
-# Runner de repli si `runner` est en quota/indisponible (ou évité via --avoid-runner)
-fallback_runner: agy
-model: haiku
-# Effort de raisonnement (low | medium | high | xhigh | max) ; omis = défaut du CLI
+# Niveau intrinsèque (N1 | N2 | N3) : résolu dynamiquement au run selon [routing] et les quotas
+level: N1
+# Décommenter pour épingler un runner/modèle précis (sinon résolu automatiquement par `level`) :
+# runner: claude
+# fallback_runner: agy
+# model: haiku
+# max_model: sonnet
+# Effort de raisonnement (low | medium | high | xhigh | max) ; omis = défaut du niveau/CLI
 effort: low
 escalate: true
-max_model: sonnet
 # Garde-fous
 max_turns: 30
 timeout_sec: 900

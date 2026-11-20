@@ -118,7 +118,8 @@ Lorsqu'une tâche s'exécute :
 | `branch` | `string` | Oui | — | Branche Git cible sur laquelle le commit sera créé. |
 | `base_branch` | `string` | Non | `"main"` | Branche source utilisée si `branch` doit être créée. |
 | `merge_strategy` | `enum` | Non | `"none"` | Stratégie appliquée une fois **toutes** les tâches du `batch` réussies : `none`, `auto_ff`, `auto_no_ff`. |
-| `runner` | `enum` | Non | `"claude"` | Exécutable cible : `claude` ou `agy`. |
+| `level` | `enum` | Non | — | Niveau intrinsèque (`N1`, `N2`, `N3`) résolu dynamiquement en runner/modèle via `[routing]` et les fenêtres d'usage. |
+| `runner` | `enum` | Non | `"claude"` | Exécutable cible (`claude`, `agy`, `codex`) ; épingle le choix si renseigné explicitement. |
 | `fallback_runner` | `enum` | Non | auto | Runner de repli (≠ `runner`) utilisé si le nominal atteint son quota, est indisponible (cf. §4.6) ou est évité via `--avoid-runner` (cf. §4.4). Absent : l'autre runner si `auto_fallback = true` (défaut). `none` : aucun repli. |
 | `model` | `string` | Non | *1er de la chaîne* | Modèle de départ (ex. `haiku`). |
 | `effort` | `enum` | Non | *défaut du CLI* | Effort de raisonnement transmis via `--effort` : `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -248,6 +249,7 @@ Usage:
   agent-runner init [options]           Initialise .agent-tasks/ dans le dépôt courant
     --gitignore                         Ajoute .agent-tasks/ à .gitignore au lieu de .git/info/exclude
     --with-agent-rules                  Ajoute les consignes dans CLAUDE.md / règles agy
+    --update-config                     Complète un config.toml existant avec les sections manquantes ([routing])
   agent-runner run [options]            Exécute les tâches présentes dans .agent-tasks/todo/
     --batch <nom>                       Ne traite que les tâches appartenant au lot <nom>
     --dry-run                           Affiche le plan d'exécution et les chaînes d'escalade sans exécuter
@@ -256,7 +258,7 @@ Usage:
     --model <modèle>                    Force le modèle de départ (escalade toujours active sauf --no-escalate)
     --no-escalate                       Désactive l'escalade automatique de modèle en cas d'échec
     --avoid-runner <runner>             Bascule d'emblée sur leur runner de repli les tâches de ce runner (répétable)
-  agent-runner models [runner]          Affiche les runners disponibles, les chaînes, exclusions et le catalogue (agy models)
+  agent-runner models [runner]          Affiche les runners disponibles, leurs capacités fonctionnelles, chaînes, profils modèles et catalogues
   agent-runner status                   Affiche l'avancement, le taux d'escalade et les coûts cumulés
   agent-runner retry <id>               Déplace une tâche de failed/ vers todo/ (en retirant le rapport d'erreur)
   agent-runner retry --all             Idem pour toutes les tâches de failed/
@@ -272,7 +274,7 @@ Le skill `plan-tasks` intègre directement les bonnes pratiques de réduction de
 1. **Séparation des rôles :** Ne modifie aucun fichier de code source lors de la planification ; initialise `.agent-tasks/` si absent et génère uniquement les fiches `.agent-tasks/todo/NN-slug.md`.
 2. **Tâches autonomes (élimination des lectures redondantes) :** Chaque fiche doit contenir dans son corps **l'extrait exact du plan et les numéros de lignes / règles applicables** à cette seule étape, afin d'éviter que chaque agent ne relise l'intégralité d'un document de spécifications à chaque exécution.
 3. **Optimisation des déplacements de code :** Lorsque le projet dispose de `move-lines` (ou équivalent), l'inclure dans `allowed_tools` et instruire l'agent de déplacer les plages de lignes via cet outil plutôt que de réécrire le code deux fois.
-4. **Routage et niveau de départ par tâche :** chaque fiche reçoit un niveau (N1 à N3) déduit d'une grille (périmètre, nature du changement, force de `verify_cmd`, risque, ambiguïté) qui fixe `model`, `effort`, `max_model` et `max_turns` ; `runner`/`fallback_runner` sont choisis selon le profil de la tâche et le quota déclaré. Le détail (grille, table des niveaux, cas où `opus` doit être privilégié) est dans `skills/plan-tasks/SKILL.md`.
+4. **Routage, capacités d'usage et niveau de départ par tâche :** chaque fiche reçoit un niveau (N1 à N3) déduit d'une grille (périmètre, nature du changement, force de `verify_cmd`, risque, ambiguïté) qui fixe `model`, `effort`, `max_model` et `max_turns`. Le choix du `runner`/`fallback_runner` s'appuie sur les capacités fonctionnelles et profils modèles exposés par `agent-runner models` (respect de `default_runner`, isolation `allowed_tools` et `max_turns` via `claude`, grand contexte et économie de quotas via `agy`). Le détail est dans `skills/plan-tasks/SKILL.md`.
 5. **Garde-fou `max_turns` et `verify_cmd` ciblé :** Fixer un `max_turns` serré (ex. `25` à `30` tours) couplé à un `verify_cmd` rapide sur le seul module modifié, afin qu'un agent qui tourne en rond sur une erreur de compilation soit interrompu tôt et relayé au modèle supérieur plutôt que de consommer 40+ tours inutiles.
 
 ## 8. Pistes d'évolution non retenues

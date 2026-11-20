@@ -199,6 +199,24 @@ class InitTests(Base):
         self.assertEqual((self.repo / ".gitignore").read_text().count(".agent-tasks/"), 1)
         self.assertEqual((self.repo / "CLAUDE.md").read_text().count("BEGIN agent-task-runner"), 1)
 
+    def test_init_update_config_preserves_existing_and_is_idempotent(self):
+        self.init()
+        cfg_path = self.repo / ".agent-tasks/config.toml"
+        cfg_path.write_text('main_branch = "develop"\ndefault_max_turns = 25\n')
+        r1 = self.runner("init", "--update-config")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertIn("config.toml complété", r1.stdout)
+        txt = cfg_path.read_text()
+        self.assertIn('main_branch = "develop"', txt)
+        self.assertIn("default_max_turns = 25", txt)
+        self.assertIn("[routing.level_runner]", txt)
+        self.assertIn("[routing.quota_threshold]", txt)
+        self.assertIn("[routing]", txt)
+        r2 = self.runner("init", "--update-config")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("config.toml déjà à jour", r2.stdout)
+        self.assertEqual(cfg_path.read_text().count("[routing.level_runner]"), 1)
+
     def test_default_runner_follows_available_runners_and_is_idempotent(self):
         cfg_path = self.repo / ".agent-tasks/config.toml"
         OUT = {"FAKE_CLAUDE_LOGGED_OUT": "1"}
@@ -471,6 +489,25 @@ class RoutingTests(Base):
         self.assertIn("runners disponibles : claude\n", r.stdout)
         self.assertIn("runner indisponible : agy (non connecté", r.stdout)
 
+    def test_models_reports_capabilities_and_metadata(self):
+        r = self.runner("models")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("capacités        : allowed_tools: oui | max_turns: oui | max_budget: oui | timeout: oui", r.stdout)
+        self.assertIn("capacités        : allowed_tools: non | max_turns: non | max_budget: non | timeout: oui", r.stdout)
+        self.assertIn("* haiku", r.stdout)
+        self.assertIn("[N1   | 200k | $   ]", r.stdout)
+        self.assertIn("* gemini-3.8-flash", r.stdout)
+        self.assertIn("[N1   | 1M+  | $   ]", r.stdout)
+
+    def test_models_reports_usage_windows(self):
+        fake_usage = json.dumps([
+            {"name": "session (5h)", "utilization": 42.0, "reset_delay": "2h15m"},
+            {"name": "semaine (7j)", "utilization": 78.0, "reset_delay": "3j 5h"},
+        ])
+        r = self.runner("models", FAKE_AGY_USAGE=fake_usage)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("fenêtres d'usage : session (5h): 42% (reset dans 2h15m) | semaine (7j): 78% (reset dans 3j 5h)", r.stdout)
+
     def test_logged_out_runner_uses_fallback(self):
         self.add_task("01-a.md", fallback_runner="agy")
         r = self.runner("run", FAKE_CLAUDE_LOGGED_OUT="1")
@@ -553,6 +590,85 @@ class RoutingTests(Base):
         self.assertEqual([mod.map_model(m, claude, agy) for m in claude], ["flash", "pro", "pro", "ultra"])
         self.assertEqual([mod.map_model(m, agy, claude) for m in agy], ["haiku", "opus", "fable"])
         self.assertEqual(mod.map_model("sonnet", claude, agy, {"sonnet": "ultra"}), "ultra")
+
+    def test_resolve_task_routing_pure(self):
+        loader = SourceFileLoader("agent_runner", str(RUNNER))
+        spec = importlib.util.spec_from_loader("agent_runner", loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["agent_runner"] = mod
+        loader.exec_module(mod)
+        from adapters.base import WindowQuota
+
+        cfg = json.loads(json.dumps(mod.DEFAULTS))
+        pref = ["agy", "claude"]
+        healthy = {
+            "agy": [WindowQuota("session (5h)", 15.0, reset_minutes=120.0)],
+            "claude": [WindowQuota("session (5h)", 30.0, reset_minutes=120.0)],
+        }
+
+        def mk_task(**kw):
+            defaults = {"path": Path("01-t.md"), "id": "01-t", "branch": "feat/t", "body": "",
+                        "allowed_tools": ["Bash(git:*)"]}
+            defaults.update(kw)
+            return mod.Task(**defaults)
+
+        # 1. Préférence par niveau (N1->agy, N3->claude)
+        self.assertEqual(mod.resolve_task_routing(mk_task(level="N1"), cfg, set(), healthy, set(), pref),
+                         ("agy", "niveau N1"))
+        self.assertEqual(mod.resolve_task_routing(mk_task(level="N3"), cfg, set(), healthy, set(), pref),
+                         ("claude", "niveau N3"))
+
+        # 2. Pin explicite respecté même si le seuil est dépassé
+        over_claude = {"agy": healthy["agy"], "claude": [WindowQuota("session (5h)", 90.0, reset_minutes=120.0)]}
+        self.assertEqual(
+            mod.resolve_task_routing(mk_task(level="N1", runner="claude", runner_pinned=True),
+                                     cfg, set(), over_claude, set(), pref),
+            ("claude", "pin"),
+        )
+
+        # 3. strict_allowed_tools force claude même en N1
+        strict_cfg = json.loads(json.dumps(cfg))
+        strict_cfg["strict_allowed_tools"] = True
+        self.assertEqual(mod.resolve_task_routing(mk_task(level="N1"), strict_cfg, set(), healthy, set(), pref),
+                         ("claude", "contrainte allowed_tools"))
+
+        # 4. max_budget_usd force claude même en N2
+        self.assertEqual(
+            mod.resolve_task_routing(mk_task(level="N2", max_budget_usd=1.5), cfg, set(), healthy, set(), pref),
+            ("claude", "contrainte budget"),
+        )
+
+        # 5. Seuil dépassé -> bascule sur l'alternative saine
+        runner, reason = mod.resolve_task_routing(mk_task(level="N3"), cfg, set(), over_claude, set(), pref)
+        self.assertEqual(runner, "agy")
+        self.assertIn("bascule (claude: session (5h) 90% >= 80%)", reason)
+
+        # 6. Reset imminent (15m <= 20m et < 95%) relâche la contrainte
+        imminent_claude = {"agy": healthy["agy"], "claude": [WindowQuota("session (5h)", 85.0, reset_minutes=15.0)]}
+        self.assertEqual(mod.resolve_task_routing(mk_task(level="N3"), cfg, set(), imminent_claude, set(), pref),
+                         ("claude", "niveau N3"))
+
+        # 7. Usage indisponible -> dégradation gracieuse vers préférence par niveau
+        unknown = {"agy": None, "claude": None}
+        self.assertEqual(mod.resolve_task_routing(mk_task(level="N2"), cfg, set(), unknown, set(), pref),
+                         ("agy", "niveau N2, usage inconnu"))
+
+        # 8. Runner indisponible -> repli propre
+        runner, reason = mod.resolve_task_routing(mk_task(level="N1"), cfg, {"agy"}, healthy, set(), pref)
+        self.assertEqual(runner, "claude")
+        self.assertIn("indisponible", reason)
+
+    def test_level_routing_in_dry_run(self):
+        self.add_task("01-n1.md", level="N1")
+        self.add_task("02-n2.md", level="N2")
+        self.add_task("03-n3.md", level="N3")
+        r = self.runner("run", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("01-n1.md  agy     gemini-3.8-flash-low -> gemini-4-hydrogen-low", r.stdout)
+        self.assertIn("02-n2.md  agy     gemini-4-argon-medium -> gemini-4-neon-medium", r.stdout)
+        self.assertIn("03-n3.md  claude  opus -> fable", r.stdout)
+        self.assertIn("[niveau N1, usage inconnu]", r.stdout)
+        self.assertIn("[niveau N3, usage inconnu]", r.stdout)
 
 
 class FrontmatterTests(unittest.TestCase):

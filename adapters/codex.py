@@ -26,6 +26,30 @@ class CodexAdapter(Adapter):
     executable = "codex"
     default_chain = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
     requires_result = True
+    supports_allowed_tools = False
+    supports_max_turns = True  # approché (actions d'agent comptées)
+    supports_max_budget = False
+    recommended_usage = "exécution standard OpenAI, sans restriction d'outils"
+    model_metadata = {
+        "gpt-5.4-mini": {
+            "level": "N1",
+            "context": "128k",
+            "cost": "$",
+            "desc": "tâches mécaniques, format, doc, scripts simples",
+        },
+        "gpt-5.4": {
+            "level": "N2",
+            "context": "256k",
+            "cost": "$$",
+            "desc": "logique standard, nouvelles fonctions, refactor",
+        },
+        "gpt-5.5": {
+            "level": "N3",
+            "context": "256k",
+            "cost": "$$$",
+            "desc": "raisonnement avancé, architecture, diagnostic",
+        },
+    }
 
     def auth_problem(self) -> str | None:
         if os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):

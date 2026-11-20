@@ -10,6 +10,7 @@
     "branch": {"type": "string", "minLength": 1},
     "base_branch": {"type": "string", "default": "main"},
     "merge_strategy": {"enum": ["none", "auto_ff", "auto_no_ff"], "default": "none"},
+    "level": {"enum": ["N1", "N2", "N3"], "description": "Niveau de complexité intrinsèque (N1=mécanique, N2=logique locale, N3=transverse/risqué) ; résolu dynamiquement en runner/modèle via [routing]"},
     "runner": {"enum": ["claude", "agy", "codex"], "default": "claude"},
     "fallback_runner": {"enum": ["claude", "agy", "codex", "none"], "description": "Runner de repli si le nominal est en quota/indisponible ou évité (--avoid-runner) ; modèles transposés via [fallback_map]. Absent : l'autre runner si auto_fallback = true (défaut). none : aucun repli"},
     "model": {"type": "string"},
