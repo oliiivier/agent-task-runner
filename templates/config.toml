@@ -59,3 +59,6 @@ codex = 80.0
 reset_grace_min = 20       # relâche le seuil si le reset est imminent (<= N min) et quota < 95%
 usage_refresh_sec = 300    # intervalle minimal (s) entre deux interrogations de quota en cours de run
 usage_refresh_tasks = 5    # rafraîchissement paresseux toutes les N tâches
+
+[routing.model_quota_threshold]
+argon = 60.0               # au-delà de 60%, évite de démarrer sur gemini-4-argon sans bloquer flash/hydrogen

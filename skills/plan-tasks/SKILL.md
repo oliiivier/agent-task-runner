@@ -10,7 +10,7 @@ Tu planifies ; tu n'exécutes pas. Chaque fiche sera exécutée plus tard par un
 ## Règles
 
 1. **Séparation des rôles.** Ne modifie AUCUN fichier de code source. Si `.agent-tasks/` est absent, lance `agent-runner init`. Écris uniquement des fiches `.agent-tasks/todo/NN-slug.md` (numérotation à 2 chiffres, ordre = ordre d'exécution).
-2. **Tâches autonomes.** Le corps de chaque fiche contient l'extrait EXACT du plan, les numéros de lignes et les règles applicables à cette seule étape (`## Objectif`, `## Contexte extrait du plan (autonome — inutile de relire tout le plan)`). Une fiche précise permet à un modèle léger de réussir du premier coup.
+2. **Tâches autonomes et minimisation du contexte.** Le corps de chaque fiche contient l'extrait EXACT du plan, les numéros de lignes, les règles applicables à cette seule étape (`## Objectif`, `## Périmètre exact (fichiers et lignes à lire uniquement)`, `## Contexte extrait du plan`). Une fiche précise évite les lectures exploratoires coûteuses et permet à un modèle léger de réussir du premier coup. Si une tâche exige de lire > 4 fichiers, scinde-la ou pose `prefer_runner: agy` (fenêtre 1M+).
 3. **Déplacements de code.** Si `move-lines` est disponible, ajoute `"Bash(move-lines:*)"` à `allowed_tools` et demande explicitement d'utiliser `move-lines <src> <début> <fin> <dst>` plutôt que de réécrire le code.
 4. **Runners disponibles, capacités et validation des modèles.** Lance `agent-runner models` avant de générer les fiches.
    - **Disponibilité :** Sa première ligne (`runners disponibles : …`) fait foi : n'écris dans `runner` et `fallback_runner` **que des runners disponibles** (installés, connectés et autorisés par `runners` dans `config.toml`). Si un seul est disponible, utilise-le partout, n'écris pas de `fallback_runner` vers le runner absent (`none` reste valable pour interdire le repli) et ignore les consignes propres à l'autre runner ; signale à l'utilisateur le runner indisponible et son motif.
@@ -24,24 +24,33 @@ Tu planifies ; tu n'exécutes pas. Chaque fiche sera exécutée plus tard par un
 6. **Un commit par tâche** (`require_commit: true`, message en anglais, format conventionnel), sauf baseline/audit (`require_commit: false`).
 7. **Cohérence de lot.** Regroupe les tâches dépendantes dans un même `batch` avec la même `branch` et fixe `merge_strategy` (`none`, `auto_ff`, `auto_no_ff`).
 
-## Choisir le niveau
+## Choisir le niveau (6 métriques objectives)
 
-Évalue chaque tâche sur cinq critères ; **le critère le plus élevé fixe le niveau** (pas la moyenne). Une tâche N3 trop grosse se découpe d'abord plutôt que d'être compensée par un modèle plus lourd.
+Évalue chaque sous-tâche sur ces **6 métriques** (sans effet cliquet vers `N3`), et consigne le résumé sur une ligne de commentaire dans le frontmatter (`# logic:... | read:... | write:... | verify:... | amb:... | tools:...`) :
 
-| Critère | N1 | N2 | N3 |
-| :--- | :--- | :--- | :--- |
-| **Nature** | déplacement, renommage, format, doc, test calqué sur existant | logique locale, nouvelle fonction, adaptation signatures/visibilité | architecture, invariants inter-modules, comportement subtil |
-| **Périmètre** | 1 fichier (ou 2 avec `move-lines`) | 1 à 3 fichiers d'un même module | plusieurs modules ou API publique |
-| **Vérification** | compile + tests ciblés couvrant le changement | compile + quelques tests | faible/absente, ou échec à l'exécution uniquement |
-| **Risque** | nul | local | données, sécurité, concurrence, migration |
-| **Ambiguïté** | aucune : extrait et lignes exacts | quelques choix d'implémentation | décisions de conception laissées à l'agent |
+1. **`logic_depth`** (`none` | `local` | `systemic`) : `none` = transformation syntaxique/`move-lines`/doc ; `local` = fonction ou cas limites d'un module ; `systemic` = invariants inter-modules, concurrence, FFI/`unsafe`, sécurité/crypto.
+2. **`read_footprint`** (`compact` | `large`) : `compact` = 1–3 fichiers (< 1 500 lignes) ; `large` = > 3 fichiers transverses ou specs entières → pose `prefer_runner: agy` (1M+ tokens).
+3. **`write_footprint`** (`1f` | `2-3f` | `multi`) : au-delà de 3 fichiers modifiés (`multi`), **scinde la fiche** plutôt que de monter le modèle.
+4. **`verification_strength`** (`strong` | `compile_only` | `weak`) : `strong` = compile + tests unitaires ciblés couvrant le changement ; `compile_only` = typage/build seul ; `weak` = runtime non testé automatiquement.
+5. **`spec_ambiguity`** (`zero` | `bounded` | `open`) : pilote `effort` (`zero` → `low`, `bounded` → `medium`, `open` → `high`). Tranche les choix d'architecture dans la fiche autant que possible avant d'accepter `open`.
+6. **`tool_strictness`** (`standard` | `strict`) : si `strict` (`move-lines` imposé ou `max_turns` serré), pose `prefer_runner: claude` (ou `runner: claude` si `strict_allowed_tools = true`).
+
+| Combinaison estimée | `level` | `effort` | `prefer_runner` | `allow_premium` |
+| :--- | :---: | :---: | :--- | :---: |
+| `logic:none` + `amb:zero` | `N1` | `low` | `agy` (ou `claude` si `move-lines`) | `false` |
+| `logic:local` + `verify:strong` + `amb:zero` | `N1` *(escalade N2)* | `medium` | selon `read_footprint` | `false` |
+| `logic:local` + `amb:bounded` | `N2` | `medium` | `agy` si `read:large`, sinon défaut | `false` |
+| `logic:local` + (`verify:compile_only` ou `amb:open`) | `N2` | `high` | selon `read_footprint` | `true` *(autorise `argon`/`opus` en escalade)* |
+| `logic:systemic` (motif bloquant explicite) | `N3` | `high` | `claude` (ou `agy` si `read:large`) | `true` |
+
+- **Motif obligatoire pour `N3` et `allow_premium: true`** : cite le critère bloquant en commentaire (concurrence, FFI/mémoire, invariant multi-modules, sécurité, `verify:weak`). Sinon reste en `N1`/`N2` avec `allow_premium: false`.
 
 | Niveau | `claude` | `agy` (chaîne : `gemini-3.8-flash < gemini-4-hydrogen < gemini-4-argon < gemini-4-neon`) | `max_turns` | `timeout_sec` |
 | :--- | :--- | :--- | :---: | :---: |
 | **N1 — Mécanique** | `model: haiku`, `effort: low`, `max_model: sonnet` | `model: gemini-3.8-flash`, `effort: low`, `max_model: gemini-4-hydrogen` | 20 | 600 |
-| **N2 — Logique locale** | `model: sonnet`, `effort: medium`, `max_model: opus` | `model: gemini-4-argon`, `effort: medium`, `max_model: gemini-4-neon` | 30 | 900 |
+| **N2 — Logique locale** | `model: sonnet`, `effort: medium`, `max_model: opus` | `model: gemini-4-hydrogen`, `effort: medium`, `max_model: gemini-4-argon` | 30 | 900 |
 | **N3 — Transverse / risqué** | `model: opus`, `effort: high`, `max_model: fable` | `model: gemini-4-neon`, `effort: high` (`xhigh` si très difficile) | 40 | 1500 |
-| **Audit / baseline** | `model: sonnet`, `effort: low`, `escalate: false`, `require_commit: false` | `model: gemini-4-argon`, `effort: low`, `escalate: false`, `require_commit: false` | 20 | 600 |
+| **Audit / baseline** | `model: sonnet`, `effort: low`, `escalate: false`, `require_commit: false` | `model: gemini-4-hydrogen`, `effort: low`, `escalate: false`, `require_commit: false` | 20 | 600 |
 
 * **`codex`** (optionnel, seulement s'il figure dans `runners disponibles`) : pas de colonne dédiée ; prends sa chaîne `[escalation].codex` affichée par `agent-runner models` — N1 = premier maillon, N2 = maillon médian, N3 = dernier (sans escalade possible : prévoir un repli) — avec les mêmes `effort`, `max_turns` et `timeout_sec` que la ligne du niveau. Comme `agy`, il ignore `allowed_tools` et le budget.
 * Toujours `escalate: true` (sauf audit). L'effort reste constant lors de l'escalade.
@@ -68,6 +77,8 @@ Examine en premier lieu la ligne `fenêtres d'usage` renvoyée par `agent-runner
 - **Runner saturé ou en alerte (> 70-75%)** :
   - Si la **session (5h)** ou la **semaine** d'un runner (souvent `claude`) dépasse **75%**, **ne planifie PAS les tâches sur ce runner**. Bascule le nominal vers l'autre runner (`runner: agy`, `fallback_runner: claude`) pour éviter le blocage immédiat à l'exécution (erreur HTTP 429).
   - Si la fenêtre hebdomadaire est critique (> 85%), réserve impérativement le runner saturé aux seules micro-tâches chirurgicales impossibles sur l'autre runner.
+- **Quota spécifique `argon (7j)` sur `agy`** :
+  - `agy` expose une 3e métrique dédiée : `argon (7j)`. Si **`argon (7j) > 60%`**, **ne jamais démarrer sur `gemini-4-argon`** (y compris en N2) : démarre sur `gemini-4-hydrogen` et réserve `argon` uniquement aux escalades N2 ou aux audits critiques.
 - **Répartition intelligente si marge disponible (< 70%)** :
   - **Préservation de la session 5h de Claude** : délester systématiquement les tâches mécaniques N1 et la lecture/documentation vers `agy` (`gemini-3.8-flash`), afin de conserver le quota horaire et hebdomadaire de Claude pour les tâches complexes N2/N3.
   - **Lots volumineux** : sur un lot de plus de 5 tâches, panache les runners selon la nature des tâches au lieu de tout router sur un seul fournisseur.
@@ -100,16 +111,17 @@ Examine en premier lieu la ligne `fenêtres d'usage` renvoyée par `agent-runner
 
 ### Gestion des quotas et répartition
 
-- Si l'utilisateur exprime une contrainte de quota au moment du prompt (ex. *"préserve mon quota Claude"*, *"utilise Gemini pour les tâches simples"*), applique directement ce routage dans le champ `runner` des fiches.
+- Si l'utilisateur exprime une contrainte de quota au moment du prompt (ex. *"préserve mon quota Claude"*, *"utilise Gemini pour les tâches simples"*), applique ce routage via `prefer_runner` (ou `runner` + `fallback_runner: none` uniquement s'il interdit tout repli).
 - En cas de saturation imprévue pendant l'exécution, `agent-runner` bascule dynamiquement sur `fallback_runner` via `[fallback_map]`. L'option `agent-runner run --avoid-runner <runner>` permet également d'éviter temporairement un runner saturé sans modifier les fiches.
 
 ## Format d'une fiche
 
-**Règle de routage dynamique (`level` par défaut) :**
+**Règle de routage dynamique (`level` + `prefer_runner` par défaut) :**
 - Écris **`level: N1`**, **`level: N2`** ou **`level: N3`** dans le frontmatter et **omets `runner`, `model` et `max_model`** par défaut : `agent-runner` résoudra dynamiquement le couple runner/modèle au moment du `run` (et l'affichera dans `--dry-run`) selon `[routing.level_runner]`, les capacités requises et les fenêtres d'usage en direct.
-- **Ne pinne `runner: claude` (et éventuellement `model`/`max_model`) que si une contrainte réelle l'impose** : outillage restreint strict (`allowed_tools` + `strict_allowed_tools`), plafond financier (`max_budget_usd`), code de sécurité critique (`fallback_runner: none`), ou demande explicite de l'utilisateur.
+- Utilise **`prefer_runner: agy | claude`** pour orienter le choix (ex. `prefer_runner: agy` pour > 3 fichiers à lire, `prefer_runner: claude` pour édition chirurgicale `move-lines`) **tout en conservant la bascule automatique sur quota**.
+- **Ne pinne `runner: claude` (et éventuellement `model`/`max_model`) que si une contrainte dure l'impose** : outillage restreint strict (`allowed_tools` + `strict_allowed_tools`), plafond financier (`max_budget_usd`), code de sécurité critique (`fallback_runner: none`), ou demande explicite de l'utilisateur.
 
-Champs autorisés uniquement (voir `templates/example-task.md` et `schemas/task.schema.json` du dépôt `agent-task-runner`) : `id`, `branch` (obligatoires) ; `batch`, `base_branch`, `merge_strategy`, `level`, `runner`, `fallback_runner`, `model`, `effort`, `escalate`, `max_model`, `verify_cmd`, `require_commit`, `allowed_tools`, `max_turns`, `timeout_sec`, `max_budget_usd` (optionnels).
+Champs autorisés uniquement (voir `templates/example-task.md` et `schemas/task.schema.json` du dépôt `agent-task-runner`) : `id`, `branch` (obligatoires) ; `batch`, `base_branch`, `merge_strategy`, `level`, `runner`, `prefer_runner`, `fallback_runner`, `model`, `effort`, `escalate`, `allow_premium`, `max_model`, `verify_cmd`, `require_commit`, `allowed_tools`, `max_turns`, `timeout_sec`, `max_budget_usd` (optionnels).
 
 ```markdown
 ---
@@ -118,8 +130,11 @@ batch: split-reader
 branch: refactor/split-reader-screen
 base_branch: main
 merge_strategy: auto_no_ff
-# N1 : déplacement pur, vérifié par compilation (routé dynamiquement par `level`)
+# logic:none | read:compact | write:2f | verify:compile_only | amb:zero | tools:strict
 level: N1
+effort: low
+prefer_runner: claude
+allow_premium: false
 max_turns: 20
 timeout_sec: 600
 verify_cmd: "tools/check-android.sh :feature:reader:compileDebugKotlin"
@@ -131,6 +146,9 @@ allowed_tools:
 
 ## Objectif
 ...
+
+## Périmètre exact (fichiers et lignes à lire uniquement)
+- `chemin/vers/Fichier.kt` (lignes 42–118) — ne lire aucun autre fichier sauf erreur de compilation.
 
 ## Contexte extrait du plan (autonome — inutile de relire tout le plan)
 ...

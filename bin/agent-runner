@@ -68,6 +68,7 @@ DEFAULTS: dict = {
     "routing": {
         "level_runner": {"N1": "agy", "N2": "agy", "N3": "claude"},
         "quota_threshold": {"claude": 80.0, "agy": 80.0, "codex": 80.0},
+        "model_quota_threshold": {"argon": 60.0},
         "reset_grace_min": 20,
         "usage_refresh_sec": 300,
         "usage_refresh_tasks": 5,
@@ -211,9 +212,9 @@ MERGE_STRATEGIES = ("none", "auto_ff", "auto_no_ff")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LEVELS = ("N1", "N2", "N3")
 FIELDS = {
-    "id", "batch", "branch", "base_branch", "merge_strategy", "level", "runner", "fallback_runner", "model",
-    "effort", "escalate", "max_model", "verify_cmd", "require_commit", "allowed_tools", "max_turns",
-    "timeout_sec", "max_budget_usd",
+    "id", "batch", "branch", "base_branch", "merge_strategy", "level", "runner", "prefer_runner",
+    "fallback_runner", "model", "effort", "escalate", "allow_premium", "max_model", "verify_cmd",
+    "require_commit", "allowed_tools", "max_turns", "timeout_sec", "max_budget_usd",
 }
 
 
@@ -229,11 +230,13 @@ class Task:
     level: str | None = None
     runner: str = "claude"
     runner_pinned: bool = False
+    prefer_runner: str | None = None
     fallback_runner: str | None = None
     fallback_auto: bool = False  # repli déduit (champ absent + auto_fallback), pas écrit dans la fiche
     model: str | None = None
     effort: str | None = None
     escalate: bool = True
+    allow_premium: bool = True
     max_model: str | None = None
     verify_cmd: str = ""
     require_commit: bool = True
@@ -280,6 +283,9 @@ def parse_task(path: Path, cfg: dict) -> Task:
             lvl_r = cfg.get("routing", {}).get("level_runner", {}).get(level)
             if lvl_r in ADAPTERS:
                 default_r = lvl_r
+        # La préférence souple prime sur le niveau pour le runner nominal (repli auto et validation du repli).
+        if not runner_pinned and meta.get("prefer_runner") in ADAPTERS:
+            default_r = meta["prefer_runner"]
         task = Task(
             path=path,
             id=str(get("id", "", str)),
@@ -291,10 +297,12 @@ def parse_task(path: Path, cfg: dict) -> Task:
             level=level,
             runner=get("runner", default_r, str),
             runner_pinned=runner_pinned,
+            prefer_runner=get("prefer_runner", None, str),
             fallback_runner=get("fallback_runner", None, str),
             model=get("model", None, str),
             effort=get("effort", None, str),
             escalate=get("escalate", True, bool),
+            allow_premium=get("allow_premium", True, bool),
             max_model=get("max_model", None, str),
             verify_cmd=get("verify_cmd", cfg["default_verify_cmd"], str),
             require_commit=get("require_commit", True, bool),
@@ -307,6 +315,8 @@ def parse_task(path: Path, cfg: dict) -> Task:
             raise ValueError(f"merge_strategy : {task.merge_strategy!r} (attendu : {', '.join(MERGE_STRATEGIES)})")
         if task.runner not in ADAPTERS:
             raise ValueError(f"runner : {task.runner!r} (attendu : {', '.join(ADAPTERS)})")
+        if task.prefer_runner is not None and task.prefer_runner not in ADAPTERS:
+            raise ValueError(f"prefer_runner : {task.prefer_runner!r} (attendu : {', '.join(ADAPTERS)})")
         if task.fallback_runner == "none":  # repli explicitement interdit
             task.fallback_runner = None
         elif task.fallback_runner is None:
@@ -377,8 +387,32 @@ def level_models(level: str | None, runner: str, cfg: dict) -> tuple[str | None,
     return chain[-1], chain[-1], effort
 
 
+def model_quota_status(runner: str, model: str, windows: list | None, cfg: dict) -> tuple[bool, bool]:
+    """Retourne (skip_start, skip_all) si le modèle appartient à un groupe de quota dédié (ex. argon)."""
+    if not windows:
+        return False, False
+    info = adapter_for(runner, cfg).get_model_info(model) or {}
+    group = info.get("quota_group")
+    if not group:
+        return False, False
+    routing_cfg = cfg.get("routing", {})
+    grace_min = float(routing_cfg.get("reset_grace_min", 20.0))
+    start_thresh = float(routing_cfg.get("model_quota_threshold", {}).get(group, 60.0))
+    hard_thresh = float(routing_cfg.get("quota_threshold", {}).get(runner, 80.0))
+    matching = [
+        w for w in windows
+        if w.name.lower().startswith(group.lower())
+        and not (w.reset_minutes is not None and w.reset_minutes <= grace_min and w.utilization < 95.0)
+    ]
+    if not matching:
+        return False, False
+    peak = max(w.utilization for w in matching)
+    return peak >= start_thresh, peak >= hard_thresh
+
+
 def candidate_models(task: Task, cfg: dict, forced: str | None, no_escalate: bool,
-                     runner: str | None = None, start: str | None = None) -> list[str]:
+                     runner: str | None = None, start: str | None = None,
+                     windows: list | None = None) -> list[str]:
     """Chaîne de modèles à essayer pour `task` sur `runner` (par défaut son runner nominal).
 
     Sur le runner de repli, `model`, `max_model` et `--model` sont transposés par `map_model` ;
@@ -397,12 +431,25 @@ def candidate_models(task: Task, cfg: dict, forced: str | None, no_escalate: boo
         src = cfg["escalation"].get(task.runner) or []
         explicit = cfg.get("fallback_map", {}).get(runner)
         model, max_model, forced = (map_model(m, src, chain, explicit) for m in (model, max_model, forced))
-    start = start or forced or model or chain[0]
-    if no_escalate or not task.escalate or start not in chain:
-        return [start]
-    i = chain.index(start)
+    effective_start = start or forced or model or chain[0]
+    if no_escalate or not task.escalate or effective_start not in chain:
+        return [effective_start]
+    i = chain.index(effective_start)
     j = chain.index(max_model) if max_model in chain else len(chain) - 1
-    return chain[i : max(i, j) + 1]
+    queue = chain[i : max(i, j) + 1]
+    if not task.allow_premium and not forced and not start and not task.model and len(queue) > 1:
+        adapter = adapter_for(runner, cfg)
+        non_premium = [m for m in queue if not (adapter.get_model_info(m) or {}).get("premium")]
+        if non_premium:
+            queue = non_premium
+    if windows and len(queue) > 1:
+        pinned_start = bool(start or forced or task.model)
+        kept = [m for m in queue if not model_quota_status(runner, m, windows, cfg)[1]]
+        if kept:
+            queue = kept
+        if not pinned_start and len(queue) > 1 and model_quota_status(runner, queue[0], windows, cfg)[0]:
+            queue = queue[1:]
+    return queue
 
 
 def pick_runner(task: Task, unavailable: set[str], avoid: set[str]) -> str:
@@ -416,14 +463,17 @@ def pick_runner(task: Task, unavailable: set[str], avoid: set[str]) -> str:
 def check_runner_quota(runner: str, windows: list | None, cfg: dict) -> tuple[bool, str]:
     """Évalue si un runner dépasse son seuil de quota.
 
-    Prend le max sur les fenêtres non relâchées. Un reset imminent (<= reset_grace_min)
-    avec utilisation < 95% relâche la contrainte sur cette fenêtre.
+    Les fenêtres dédiées à un groupe de modèle (ex. `argon (7j)`) n'invalident pas tout le runner
+    tant que les fenêtres globales (session/semaine) restent disponibles.
     """
     if not windows:
         return False, "usage inconnu"
     routing_cfg = cfg.get("routing", {})
     threshold = float(routing_cfg.get("quota_threshold", {}).get(runner, 80.0))
     grace_min = float(routing_cfg.get("reset_grace_min", 20.0))
+    model_groups = {
+        g.lower() for g in routing_cfg.get("model_quota_threshold", {})
+    }
     active = []
     relaxed = False
     for w in windows:
@@ -433,7 +483,9 @@ def check_runner_quota(runner: str, windows: list | None, cfg: dict) -> tuple[bo
         active.append(w)
     if not active:
         return False, "reset imminent" if relaxed else "usage inconnu"
-    max_w = max(active, key=lambda w: w.utilization)
+    runner_windows = [w for w in active if not any(w.name.lower().startswith(g) for g in model_groups)]
+    pool = runner_windows or active
+    max_w = max(pool, key=lambda w: w.utilization)
     if max_w.utilization >= threshold:
         return True, f"{max_w.name} {max_w.utilization:.0f}% >= {threshold:.0f}%"
     return False, f"{max_w.name} {max_w.utilization:.0f}%"
@@ -464,7 +516,7 @@ def resolve_task_routing(
     ]
     pool = hard_capable if hard_capable else candidates
 
-    if task.runner_pinned or not task.level:
+    if task.runner_pinned or (not task.level and not task.prefer_runner):
         base_reason = "pin" if task.runner_pinned else "défaut"
         if task.runner in pool:
             if not task.runner_pinned:
@@ -488,12 +540,16 @@ def resolve_task_routing(
         return task.runner, "indisponible"
 
     level_pref = (
-        cfg.get("routing", {}).get("level_runner", {}).get(task.level)
-        if task.level else cfg.get("default_runner")
+        task.prefer_runner
+        or (cfg.get("routing", {}).get("level_runner", {}).get(task.level) if task.level else None)
+        or cfg.get("default_runner")
     )
     if level_pref in pool:
         preferred = level_pref
-        base_reason = f"niveau {task.level}" if task.level else "défaut"
+        if task.prefer_runner:
+            base_reason = f"préférence {task.prefer_runner}" + (f" ({task.level})" if task.level else "")
+        else:
+            base_reason = f"niveau {task.level}" if task.level else "défaut"
     elif pool:
         preferred = pool[0]
         if needs_tools and level_pref and not adapter_for(level_pref, cfg).supports_allowed_tools:
@@ -751,7 +807,8 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
         raise Fail(f"{task.id} : runner {runner!r} indisponible (quota ou exécutable absent) et aucun "
                    "fallback_runner utilisable")
     effective_effort = task.effort or (level_models(task.level, runner, cfg)[2] if task.level else None)
-    queue = candidate_models(task, cfg, args.model, args.no_escalate, runner)
+    queue = candidate_models(task, cfg, args.model, args.no_escalate, runner,
+                             windows=args.usage_cache.snapshot.get(runner))
     attempts: list[dict] = []
     prev: dict | None = None
     note = f" (repli de {task.runner})" if runner != task.runner else ""
@@ -819,7 +876,8 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
             src = cfg["escalation"].get(runner) or []
             dst = cfg["escalation"].get(alt) or []
             start = map_model(model, src, dst, cfg.get("fallback_map", {}).get(alt))
-            queue = candidate_models(task, cfg, args.model, args.no_escalate, alt, start=start)
+            queue = candidate_models(task, cfg, args.model, args.no_escalate, alt, start=start,
+                                     windows=args.usage_cache.snapshot.get(alt))
             print(_ansi("33", f"    bascule {runner} -> {alt} : {' -> '.join(queue)}"))
             runner = alt
 
@@ -1109,7 +1167,8 @@ def print_dry_run(tasks: list[Task], cfg: dict, args, status: dict[str, str | No
         effective_effort = t.effort or (level_models(t.level, runner, cfg)[2] if t.level else None)
         try:
             chain = [adapter.resolve_model(m, effective_effort, args.catalogs.get(runner))
-                     for m in candidate_models(t, cfg, args.model, args.no_escalate, runner)]
+                     for m in candidate_models(t, cfg, args.model, args.no_escalate, runner,
+                                               windows=args.usage_cache.snapshot.get(runner))]
         except ValueError as exc:
             raise Fail(f"{t.id} : {exc}") from exc
         group = (t.batch, t.branch, t.base_branch, t.merge_strategy)

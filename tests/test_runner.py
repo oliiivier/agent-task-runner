@@ -658,6 +658,42 @@ class RoutingTests(Base):
         self.assertEqual(runner, "claude")
         self.assertIn("indisponible", reason)
 
+        # 9. prefer_runner oriente le choix mais bascule librement sur quota
+        self.assertEqual(
+            mod.resolve_task_routing(mk_task(level="N2", prefer_runner="claude"), cfg, set(), healthy, set(), pref),
+            ("claude", "préférence claude (N2)"),
+        )
+        runner, reason = mod.resolve_task_routing(
+            mk_task(level="N2", prefer_runner="claude"), cfg, set(), over_claude, set(), pref
+        )
+        self.assertEqual(runner, "agy")
+        self.assertIn("bascule (claude:", reason)
+
+        # 10. argon (7j) élevé ne bloque pas agy globalement, mais filtre gemini-4-argon de la file
+        high_argon = {
+            "agy": [
+                WindowQuota("session (5h)", 15.0, reset_minutes=120.0),
+                WindowQuota("argon (7j)", 85.0, reset_minutes=1440.0),
+            ],
+            "claude": healthy["claude"],
+        }
+        self.assertEqual(mod.resolve_task_routing(mk_task(level="N2"), cfg, set(), high_argon, set(), pref),
+                         ("agy", "niveau N2"))
+        self.assertEqual(
+            mod.candidate_models(mk_task(level="N2"), cfg, None, False, "agy", windows=high_argon["agy"]),
+            ["gemini-4-hydrogen"],
+        )
+
+        # 11. allow_premium=False bride l'escalade vers les modèles premium (argon/neon/opus/fable)
+        self.assertEqual(
+            mod.candidate_models(mk_task(level="N2", allow_premium=False), cfg, None, False, "agy"),
+            ["gemini-4-hydrogen"],
+        )
+        self.assertEqual(
+            mod.candidate_models(mk_task(level="N2", allow_premium=False), cfg, None, False, "claude"),
+            ["sonnet"],
+        )
+
     def test_level_routing_in_dry_run(self):
         self.add_task("01-n1.md", level="N1")
         self.add_task("02-n2.md", level="N2")
@@ -665,7 +701,7 @@ class RoutingTests(Base):
         r = self.runner("run", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("01-n1.md  agy     gemini-3.8-flash-low -> gemini-4-hydrogen-low", r.stdout)
-        self.assertIn("02-n2.md  agy     gemini-4-argon-medium -> gemini-4-neon-medium", r.stdout)
+        self.assertIn("02-n2.md  agy     gemini-4-hydrogen-medium -> gemini-4-argon-medium", r.stdout)
         self.assertIn("03-n3.md  claude  opus -> fable", r.stdout)
         self.assertIn("[niveau N1, usage inconnu]", r.stdout)
         self.assertIn("[niveau N3, usage inconnu]", r.stdout)

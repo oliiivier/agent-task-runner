@@ -184,21 +184,24 @@ class AgyAdapter(Adapter):
             "desc": "rapide, économique, grand contexte, doc/audits, mécanique",
         },
         "gemini-4-hydrogen": {
-            "level": "N1/N2",
+            "level": "N2",
             "context": "1M+",
             "cost": "$",
             "desc": "rapide, logique locale simple à modérée",
         },
         "gemini-4-argon": {
-            "level": "N2",
+            "level": "N2+",
             "context": "1M+",
             "cost": "$$",
+            "quota_group": "argon",
+            "premium": True,
             "desc": "logique avancée, refactor transverse multi-fichiers",
         },
         "gemini-4-neon": {
             "level": "N3",
             "context": "1M+",
             "cost": "$$$",
+            "premium": True,
             "desc": "raisonnement frontière, diagnostic, invariants complexes",
         },
     }

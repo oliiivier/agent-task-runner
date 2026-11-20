@@ -105,12 +105,14 @@ class ClaudeAdapter(Adapter):
             "level": "N3",
             "context": "200k",
             "cost": "$$$",
+            "premium": True,
             "desc": "architecture, invariants complexes, concurrence, code sensible",
         },
         "fable": {
             "level": "N3+",
             "context": "200k",
             "cost": "$$$$",
+            "premium": True,
             "desc": "plafond d'escalade ultime, haute ambiguïté",
         },
     }
