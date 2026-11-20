@@ -273,3 +273,22 @@ Le skill `plan-tasks` intègre directement les bonnes pratiques de réduction de
 3. **Optimisation des déplacements de code :** Lorsque le projet dispose de `move-lines` (ou équivalent), l'inclure dans `allowed_tools` et instruire l'agent de déplacer les plages de lignes via cet outil plutôt que de réécrire le code deux fois.
 4. **Routage et niveau de départ par tâche :** chaque fiche reçoit un niveau (N1 à N3) déduit d'une grille (périmètre, nature du changement, force de `verify_cmd`, risque, ambiguïté) qui fixe `model`, `effort`, `max_model` et `max_turns` ; `runner`/`fallback_runner` sont choisis selon le profil de la tâche et le quota déclaré. Le détail (grille, table des niveaux, cas où `opus` doit être privilégié) est dans `skills/plan-tasks/SKILL.md`.
 5. **Garde-fou `max_turns` et `verify_cmd` ciblé :** Fixer un `max_turns` serré (ex. `25` à `30` tours) couplé à un `verify_cmd` rapide sur le seul module modifié, afin qu'un agent qui tourne en rond sur une erreur de compilation soit interrompu tôt et relayé au modèle supérieur plutôt que de consommer 40+ tours inutiles.
+
+## 8. Pistes d'évolution non retenues
+
+### 8.1. Exécution parallèle des tâches (worktrees, exécution distante)
+
+**Idée :** exécuter en parallèle des tâches indépendantes, chacune dans son propre `git worktree` ou sur un runner distant (ex. Codex cloud), en marquant dans les fiches générées par `plan-tasks` lesquelles sont parallélisables.
+
+**Statut :** non retenue pour l'instant (gain jugé inférieur au coût).
+
+**Motifs :**
+- **Goulot = quota, pas latence :** l'outil tourne sans surveillance ; paralléliser consomme le quota plus vite sans augmenter le débit total.
+- **Pas de parallélisme intra-lot :** les micro-tâches d'un `batch` s'enchaînent sur la même branche, chacune partant du commit de la précédente.
+- **Coût de build multiplié :** chaque worktree a son propre répertoire de build (`target/`…), donc chaque `verify_cmd` recompile depuis zéro ; les états locaux partagés entre fiches (références générées, caches) ne suivent pas.
+- **Complexité du modèle d'intégrité :** conflits de merge entre lots, accès concurrent à `todo/`→`done/`, et `finalize_batches` fait `git checkout <base_branch>`, refusé par Git si cette branche est déjà extraite dans un autre worktree.
+- **Exécution distante :** environnement différent, synchronisation par push/PR, et l'orchestrateur ne peut plus valider localement les post-conditions C2–C4 (contraire au principe de contrôle d'intégrité externe).
+
+**Alternative actuelle :** le `batch` est l'unité naturelle de parallélisme. Un parallélisme manuel reste possible sans modification de code : un worktree par lot, copie de `.agent-tasks/`, `agent-runner --batch X` avec `merge_strategy: none`, puis merge manuel.
+
+**À reconsidérer si :** plusieurs lots longs et réellement indépendants (crates/modules disjoints) deviennent fréquents, avec de la marge de quota et un besoin réel de réduire le temps d'attente. Prérequis alors : règle d'indépendance inter-lots explicite dans `plan-tasks` (lots disjoints en fichiers et sans dépendance), plutôt qu'un champ `parallelizable` par tâche.
