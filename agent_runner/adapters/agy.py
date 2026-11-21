@@ -312,8 +312,12 @@ class AgyAdapter(Adapter):
 
     def finalize(self, state: AttemptResult, lines: list[str], req: RunRequest) -> None:
         text = "".join(lines).strip()
-        if HEADLESS_DENIED_RE.search(text):
-            state.permission_denied = True
+        if req.permission_mode != "bypass":
+            for raw in lines:
+                s = raw.strip()
+                if not s.startswith("{") and HEADLESS_DENIED_RE.search(s):
+                    state.permission_denied = True
+                    break
         data = state.final_json if state.final_json is not None else _extract_json(text)
         if data is None:
             if getattr(self, "_step_usage", None):
@@ -322,6 +326,8 @@ class AgyAdapter(Adapter):
                 state.cache_read = sum(int(_first(u, "cache_read_input_tokens", "cache_read_tokens", "cachedContentTokenCount")) for u in self._step_usage.values())
             state.result_text = text[-2000:]
             return
+        if req.permission_mode != "bypass" and isinstance(data.get("error"), str) and HEADLESS_DENIED_RE.search(data["error"]):
+            state.permission_denied = True
         state.final_json = data
         state.has_result = True
         usage = data.get("usage") or data.get("usageMetadata") or {}

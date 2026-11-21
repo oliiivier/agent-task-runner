@@ -990,6 +990,39 @@ class OperationsTests(Base):
         self.assertEqual(st.cache_read, 12000)
         self.assertEqual(st.result_text, "done")
 
+    def test_agy_headless_denied_ignores_tool_output_and_bypass(self):
+        from agent_runner.adapters.agy import AgyAdapter
+        from agent_runner.adapters.base import AttemptResult, RunRequest
+        denied_msg = 'a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.'
+        tool_event = json.dumps({
+            "event": "step_update",
+            "step_update": {"step_index": 1, "state": "DONE", "step_type": "tool",
+                            "tool_info": {"name": "run_command", "output": denied_msg}},
+        }) + "\n"
+        # En mode accept, une sortie d'outil JSON contenant le motif ne doit pas déclencher permission_denied
+        ad = AgyAdapter()
+        req_accept = RunRequest(prompt="p", model="gemini-3.8-flash-medium", cwd=ROOT,
+                                allowed_tools=[], max_turns=10, timeout_sec=60,
+                                max_budget_usd=None, permission_mode="accept")
+        ad.build_command(req_accept)
+        st = AttemptResult()
+        ad.on_line(tool_event, st, req_accept)
+        ad.finalize(st, [tool_event], req_accept)
+        self.assertFalse(st.permission_denied)
+        # En mode bypass, même une ligne texte brute ne doit pas déclencher permission_denied
+        req_bypass = RunRequest(prompt="p", model="gemini-3.8-flash-medium", cwd=ROOT,
+                                allowed_tools=[], max_turns=10, timeout_sec=60,
+                                max_budget_usd=None, permission_mode="bypass")
+        ad.build_command(req_bypass)
+        st2 = AttemptResult()
+        ad.finalize(st2, [denied_msg + "\n"], req_bypass)
+        self.assertFalse(st2.permission_denied)
+        # En mode accept, une ligne texte brute (stderr agy) déclenche bien permission_denied
+        ad.build_command(req_accept)
+        st3 = AttemptResult()
+        ad.finalize(st3, [denied_msg + "\n"], req_accept)
+        self.assertTrue(st3.permission_denied)
+
     def test_merge_batch_and_dry_run(self):
         self.init()
         self.add_task("01-a.md", batch="alpha", branch="feat/alpha", merge_strategy="none")
