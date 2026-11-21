@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from adapters.logs import Style, format_log_line, stream_logs  # noqa: E402
+from agent_runner.adapters.logs import Style, format_log_line, stream_logs  # noqa: E402
 
 BIN = str(ROOT / "bin" / "agent-runner")
 

@@ -607,7 +607,7 @@ class RoutingTests(Base):
         mod = importlib.util.module_from_spec(spec)
         sys.modules["agent_runner_bin"] = mod
         loader.exec_module(mod)
-        from adapters.base import WindowQuota
+        from agent_runner.adapters.base import WindowQuota
 
         cfg = json.loads(json.dumps(mod.DEFAULTS))
         pref = ["agy", "claude"]
@@ -783,7 +783,7 @@ class ParsingRobustnessTests(unittest.TestCase):
 
     def test_agy_extracts_multiline_json_after_noise(self):
         sys.path.insert(0, str(RUNNER.parent.parent))
-        from adapters.agy import _extract_json
+        from agent_runner.adapters.agy import _extract_json
         out = 'Info: loading\n{"note": "bruit"}\nwarning\n' + json.dumps(
             {"result": "ok", "usage": {"input_tokens": 3}}, indent=2) + "\ntrailing"
         self.assertEqual(_extract_json(out)["usage"], {"input_tokens": 3})
@@ -943,7 +943,7 @@ class OperationsTests(Base):
         self.assertIn("avg_overlap_pct", payload["savings"])
 
     def test_claude_credits_required_429_triggers_quota_fallback(self):
-        from adapters.base import Adapter, AttemptResult
+        from agent_runner.adapters.base import Adapter, AttemptResult
         ad = Adapter()
         st = AttemptResult(
             returncode=1, is_error=True, has_result=True,
@@ -967,8 +967,8 @@ class OperationsTests(Base):
         self.assertEqual([p.name for p in (self.repo / ".agent-tasks/todo").glob("*.md")], ["03-c.md"])
 
     def test_agy_stream_json_counts_turns_and_cache_read(self):
-        from adapters.agy import AgyAdapter
-        from adapters.base import AttemptResult, RunRequest
+        from agent_runner.adapters.agy import AgyAdapter
+        from agent_runner.adapters.base import AttemptResult, RunRequest
         ad = AgyAdapter()
         req = RunRequest(prompt="p", model="gemini-4-hydrogen-medium", cwd=ROOT,
                          allowed_tools=[], max_turns=30, timeout_sec=60, max_budget_usd=None)
