@@ -1168,21 +1168,7 @@ def cmd_models(args) -> int:
     return 0
 
 
-def _ansi(code: str, text: str, stream=None) -> str:
-    """Applique un style ANSI uniquement sur un terminal interactif (et sans NO_COLOR)."""
-    target = stream or sys.stdout
-    if target.isatty() and not os.environ.get("NO_COLOR"):
-        return f"\033[{code}m{text}\033[0m"
-    return text
-
-
-def _fmt_int(n: int | float) -> str:
-    return f"{int(n):,}".replace(",", " ")
-
-
-def _fmt_dur(sec: float) -> str:
-    s = int(sec)
-    return f"{s}s" if s < 60 else f"{s // 60}m{s % 60:02d}s"
+from agent_runner.ui import _ansi, _fmt_dur, _fmt_int  # noqa: E402
 
 
 def print_dry_run(tasks: list[Task], cfg: dict, args, status: dict[str, str | None], avoid: set[str]) -> None:
