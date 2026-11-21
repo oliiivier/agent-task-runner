@@ -1926,18 +1926,21 @@ def cmd_merge(args) -> int:
 
 
 def cmd_create_plan(args) -> int:
-    """Découpe un plan Markdown en fiches `.agent-tasks/todo/` via un agent headless."""
+    """Découpe un ou plusieurs documents (plan, spécification, cartographie) en fiches `.agent-tasks/todo/`."""
     root = repo_root()
     base = root / TASKS_DIR
     if not base.is_dir():
         raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
     if dirty(root):
         raise Fail("arbre de travail non propre (fichiers suivis modifiés) : commit ou stash avant `create-plan`")
-    plan_path = Path(args.plan)
-    if not plan_path.is_absolute():
-        plan_path = (Path.cwd() / plan_path).resolve()
-    if not plan_path.is_file():
-        raise Fail(f"plan introuvable : {args.plan}")
+    plan_paths: list[Path] = []
+    for raw in args.plans:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        if not p.is_file():
+            raise Fail(f"document introuvable : {raw}")
+        plan_paths.append(p)
 
     cfg = load_config(root)
     preference = enabled_runners(cfg)
@@ -1964,18 +1967,20 @@ def cmd_create_plan(args) -> int:
     if args.base_branch:
         constraints.append(f"- `base_branch`: `{args.base_branch}`")
     q_begin, q_end = "<!-- agent-runner:questions -->", "<!-- /agent-runner:questions -->"
+    docs_list = ", ".join(f"`{p}`" for p in plan_paths)
+    docs_sections = "\n\n".join(f"## Document : {p.name} ({p})\n\n{p.read_text()}" for p in plan_paths)
     prompt = (
-        f"Planifie le fichier `{plan_path}` en micro-tâches dans `.agent-tasks/todo/` en suivant "
+        f"Planifie les documents suivants ({docs_list}) en micro-tâches dans `.agent-tasks/todo/` en suivant "
         f"strictement le skill `plan-tasks` ci-dessous.\n\n"
         + ("Contraintes imposées :\n" + "\n".join(constraints) + "\n\n" if constraints else "")
         + "## Protocole en cas d'ambiguïté (OBLIGATOIRE)\n"
-        "Si le plan comporte des ambiguïtés bloquantes ou des choix d'architecture non tranchés "
+        "Si ces documents comportent des ambiguïtés bloquantes ou des choix d'architecture non tranchés "
         "qui t'empêchent de rédiger des fiches autonomes et sûres :\n"
         "- NE CRÉE AUCUNE fiche dans `.agent-tasks/todo/` et ne modifie aucun fichier.\n"
         f"- Réponds uniquement avec un bloc balisé `{q_begin} ... {q_end}` listant "
         "chaque question numérotée suivie de `- Recommandation : ...`.\n\n"
         f"## Instructions plan-tasks\n\n{skill_text}\n\n"
-        f"## Contenu du plan ({plan_path.name})\n\n{plan_path.read_text()}"
+        f"{docs_sections}"
     )
 
     head_before = git("rev-parse", "HEAD", cwd=root).stdout.strip()
@@ -1990,7 +1995,8 @@ def cmd_create_plan(args) -> int:
         permission_mode=cfg["permission"], effort=effort,
         extra_args=list(cfg.get("extra_args", {}).get(runner, [])),
     )
-    print(_ansi("1", f"create-plan : {plan_path.name} ({runner}/{model_id}, effort={effort})"))
+    label = ", ".join(p.name for p in plan_paths)
+    print(_ansi("1", f"create-plan : {label} ({runner}/{model_id}, effort={effort})"))
     res = adapter.run(req, logs / "create-plan.log", logs / "create-plan.json")
 
     # Garde-fou code source : rollback Git si un fichier suivi/non-suivi hors .agent-tasks/ a été modifié.
@@ -2010,7 +2016,7 @@ def cmd_create_plan(args) -> int:
         print(questions)
         opts = " ".join(f"--{k} {v}" for k, v in (("batch", args.batch), ("branch", args.branch), ("base-branch", args.base_branch)) if v)
         print(_ansi("1", "\nPrompt à exécuter en session interactive (Claude / agy) :\n"))
-        print(f"Utilise le skill plan-tasks pour découper {plan_path} dans .agent-tasks/todo/ "
+        print(f"Utilise le skill plan-tasks pour découper {' '.join(str(p) for p in plan_paths)} dans .agent-tasks/todo/ "
               + (f"({opts}) " if opts else "")
               + "en tenant compte des réponses suivantes :\n"
               + "\n".join(ln for ln in questions.splitlines() if ln.strip()))
@@ -2089,8 +2095,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("clean", help="supprime logs/ (et done/ avec --all)")
     p.add_argument("--all", action="store_true")
     p.set_defaults(func=cmd_clean)
-    p = sub.add_parser("create-plan", help="découpe un plan Markdown en fiches todo/ (avec garde-fou questions)")
-    p.add_argument("plan", help="chemin vers le fichier plan Markdown")
+    p = sub.add_parser("create-plan", help="découpe un ou plusieurs documents (plan, spec, carto) en fiches todo/")
+    p.add_argument("plans", nargs="+", help="chemin(s) vers le(s) fichier(s) plan / spec / cartographie")
     p.add_argument("--batch", help="nom du lot imposé aux fiches")
     p.add_argument("--branch", help="branche cible imposée aux fiches")
     p.add_argument("--base-branch", help="branche de base (défaut : main)")

@@ -21,8 +21,8 @@ Python 3.11+ (bibliothèque standard uniquement) et Git.
 cd mon-projet
 agent-runner init [--gitignore] [--with-agent-rules] [--update-config]   # crée ou complète .agent-tasks/
 agent-runner models                                    # runners disponibles (installés + connectés) et modèles
-# générer les tâches avec le skill plan-tasks (interactif) ou en headless :
-agent-runner create-plan docs/mon-plan.md [--batch X] [--branch feat/x]
+# générer les tâches avec le skill plan-tasks (interactif) ou en headless (un ou plusieurs documents) :
+agent-runner create-plan docs/cartographie.md docs/plan.md [--batch X] [--branch feat/x]
 agent-runner run --dry-run                              # plan + chaînes d'escalade
 agent-runner run [--batch X] [--resume] [--continue-on-error] [--model M] [--no-escalate] [--avoid-runner R]
 agent-runner status

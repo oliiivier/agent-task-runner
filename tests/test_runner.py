@@ -982,10 +982,12 @@ class OperationsTests(Base):
         self.assertIn("Prompt à exécuter en session interactive", r_q.stdout)
         self.assertEqual([p.name for p in (self.repo / ".agent-tasks/todo").glob("*.md")], ["00-existing.md"])
 
-        # Cas 2 : création réussie et validation des nouvelles fiches
+        # Cas 2 : création réussie avec plusieurs documents (cartographie + plan) et validation
+        carto = self.repo / "cartographie.md"
+        carto.write_text("# Cartographie\n\nModules A et B.\n")
         good_task = self.repo / ".agent-tasks/todo/01-step.md"
         r_ok = self.runner(
-            "create-plan", str(plan), "--batch", "alpha", "--branch", "feat/alpha",
+            "create-plan", str(carto), str(plan), "--batch", "alpha", "--branch", "feat/alpha",
             FAKE_CREATE_TASK_FILE=str(good_task),
         )
         self.assertEqual(r_ok.returncode, 0, r_ok.stderr)
