@@ -4,6 +4,8 @@
 
 ## Exemple réel sur un lot mixte de 46 tâches (`claude` + `agy`)
 
+> **Contexte du chantier :** portage Kotlin → Swift découpé par module en paires **`spec` → `impl`** (`agy` 1M+ pour absorber le code Kotlin source et rédiger la spec, puis `agy` `N1`/`N2` ou `claude opus` `N3` pour l'implémentation et la compilation/tests Swift). Cet enchaînement par module garantit un feedback de compilation immédiat avant les specs suivantes, explique le recouvrement élevé (`78 %` sur les specs/modules partagés) et lisse naturellement le quota 5h de Claude sur ~4h50 (`289m`).
+
 ```text
 Tâche                              #  Modèle                        Tours     Entrée    Cache W    Cache R     Sortie     Coût   Durée  Statut
 ----------------------------------------------------------------------------------------------------------------------------------------------
