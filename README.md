@@ -34,7 +34,7 @@ agent-runner clean [--all]
 
 Une tâche est un fichier `.agent-tasks/todo/NN-slug.md` (frontmatter YAML + corps autonome) ; voir [`templates/example-task.md`](templates/example-task.md) et [`schemas/task.schema.json`](schemas/task.schema.json). Configuration : `.agent-tasks/config.toml` (modèle : [`templates/config.toml`](templates/config.toml), incluant `permission`, `strict_allowed_tools` et `on_finish_cmd`).
 
-Pour brancher un outil de ticketing ou de notification externe (Jira, Linear, Slack…) via `on_finish_cmd` et `agent-runner report --json`, voir [`docs/ticketing-integration.md`](docs/ticketing-integration.md).
+Pour brancher un outil de ticketing ou de notification externe (Jira, Linear, Slack…) via `on_finish_cmd` et `agent-runner report --json`, voir [`docs/ticketing-integration.md`](docs/ticketing-integration.md). Pour l'interprétation des métriques d'économie de coûts et de cache dans `report`, voir [`docs/cost-savings-example.md`](docs/cost-savings-example.md).
 
 ### Exemple de prompt pour découper un plan (Opus / session interactive)
 

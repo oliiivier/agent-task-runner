@@ -1613,6 +1613,48 @@ def cmd_status(args) -> int:
     return 0
 
 
+_FILE_PATH_RE = re.compile(r"(?:`([^`\s]+)`|\b([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+\.(?:py|kt|kts|rs|ts|tsx|js|jsx|go|java|c|cpp|h|tf|tfvars|yml|yaml|json|toml|md|sql|sh))\b)")
+
+
+def _extract_task_files(body: str) -> set[str]:
+    """Extrait les chemins de fichiers mentionnés dans une fiche (en priorité `## Périmètre exact`)."""
+    scope_lines: list[str] = []
+    in_scope = False
+    for line in body.splitlines():
+        s = line.strip()
+        if s.lower().startswith("## périmètre"):
+            in_scope = True
+            continue
+        if in_scope and s.startswith("## "):
+            break
+        if in_scope:
+            scope_lines.append(line)
+    text = "\n".join(scope_lines) if scope_lines else body
+    files: set[str] = set()
+    for m in _FILE_PATH_RE.finditer(text):
+        cand = m.group(1) or m.group(2)
+        if cand and ("/" in cand or "." in cand) and not cand.startswith(("http://", "https://")):
+            files.add(cand.lstrip("./"))
+    return files
+
+
+def _load_task_files(base: Path) -> dict[str, set[str]]:
+    """Associe chaque `task_id` aux fichiers cités dans `.agent-tasks/{done,failed,todo}`."""
+    mapping: dict[str, set[str]] = {}
+    for folder in ("done", "failed", "todo"):
+        d = base / folder
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("*.md")):
+            try:
+                meta, body = parse_frontmatter(p.read_text())
+            except ValueError:
+                continue
+            tid = str(meta.get("id") or p.stem)
+            mapping[tid] = _extract_task_files(body)
+    return mapping
+
+
 def _row_to_attempt(r: list[str]) -> dict:
     return {
         "timestamp": r[0], "batch": r[1], "task_id": r[2], "attempt": int(r[3]),
@@ -1622,13 +1664,25 @@ def _row_to_attempt(r: list[str]) -> dict:
     }
 
 
-def summarize_savings(attempts: list[dict], cfg: dict) -> dict:
-    """Calcule la répartition par palier (N1/N2/N3) et le coût contrefactuel tout-N3."""
+def summarize_savings(attempts: list[dict], cfg: dict, task_files: dict[str, set[str]] | None = None) -> dict:
+    """Calcule la répartition par palier, la borne basse tout-N3 et le scénario session unique avec cache."""
     by_level = {"N1": 0, "N2": 0, "N3": 0}
     actual_total = 0.0
+    billed_total = 0.0
     baseline_total = 0.0
+    single_total = 0.0
+    seen_files: set[str] = set()
+    cum_ctx = 0
+    compaction_cap = 150_000  # plafond réaliste avant compaction en session unique
+    overlaps: list[float] = []
     for a in attempts:
         runner = a["runner"]
+        billed_total += a["cost_usd"]
+        files = (task_files or {}).get(a["task_id"], set())
+        overlap = (len(files & seen_files) / len(files)) if (files and seen_files) else 0.0
+        if files:
+            overlaps.append(overlap)
+        seen_files |= files
         if runner in ADAPTERS:
             adapter = adapter_for(runner, cfg)
             info = adapter.get_model_info(a["model"]) or {}
@@ -1641,21 +1695,34 @@ def summarize_savings(attempts: list[dict], cfg: dict) -> dict:
                 if p_actual else 0.0
             )
             p_base = adapter.get_model_pricing(adapter.baseline_model) if adapter.baseline_model else None
-            baseline = (
-                adapter.estimate_cost(p_base, a["tokens_in"], a["cache_write"], a["cache_read"], a["tokens_out"])
-                if p_base else actual
-            )
+            if p_base:
+                baseline = adapter.estimate_cost(p_base, a["tokens_in"], a["cache_write"], a["cache_read"], a["tokens_out"])
+                fresh_in = int(a["tokens_in"] * (1.0 - overlap))
+                fresh_cw = int(a["cache_write"] * (1.0 - overlap))
+                shared_cr = int((a["tokens_in"] + a["cache_write"]) * overlap)
+                cum_cr = a["turns"] * cum_ctx
+                single = adapter.estimate_cost(p_base, fresh_in, fresh_cw, a["cache_read"] + shared_cr + cum_cr, a["tokens_out"])
+                cum_ctx = min(compaction_cap, cum_ctx + fresh_in + fresh_cw + a["tokens_out"])
+            else:
+                baseline = actual
+                single = actual
         else:
             actual = a["cost_usd"]
             baseline = actual
+            single = actual
         actual_total += actual
         baseline_total += baseline
+        single_total += single
     saved = max(0.0, baseline_total - actual_total)
     saved_pct = round(100.0 * saved / baseline_total, 1) if baseline_total > 0 else 0.0
+    avg_overlap_pct = round(100.0 * sum(overlaps) / len(overlaps), 1) if overlaps else 0.0
     return {
         "by_level": by_level,
+        "billed_cost_usd": round(billed_total, 4),
         "actual_cost_usd": round(actual_total, 4),
         "baseline_n3_cost_usd": round(baseline_total, 4),
+        "single_session_n3_cost_usd": round(single_total, 4),
+        "avg_overlap_pct": avg_overlap_pct,
         "saved_usd": round(saved, 4),
         "saved_pct": saved_pct,
     }
@@ -1667,10 +1734,16 @@ def _print_savings(sav: dict) -> None:
     if dist:
         print(_ansi("2", f"Paliers : {dist}"))
     if sav["baseline_n3_cost_usd"] > 0 and sav["saved_usd"] > 0:
-        print(_ansi("2", f"Économie estimée : ${sav['actual_cost_usd']:.2f} réel vs "
+        billed = sav.get("billed_cost_usd", 0.0)
+        billed_note = (f" (dont ${billed:.2f} facturé)"
+                       if billed > 0 and abs(sav["actual_cost_usd"] - billed) >= 0.01 else "")
+        print(_ansi("2", f"Économie estimée : ${sav['actual_cost_usd']:.2f} réel estimé{billed_note} vs "
                          f"~${sav['baseline_n3_cost_usd']:.2f} en tout-N3 (-{sav['saved_pct']:.0f} %, "
                          "borne basse à tokens identiques ; le gain réel est encore supérieur "
                          "grâce à l'absence de cumul de contexte)"))
+    if sav.get("single_session_n3_cost_usd", 0) > 0 and sum(lvl.values()) > 1:
+        print(_ansi("2", f"Session unique N3 (modélisée, recouvrement fichiers {sav['avg_overlap_pct']:.0f} %, "
+                         f"plafond compaction 150k) : ~${sav['single_session_n3_cost_usd']:.2f}"))
 
 
 def cmd_report(args) -> int:
@@ -1705,7 +1778,7 @@ def cmd_report(args) -> int:
     tot_turns = sum(p["turns"] for p in parsed)
     tot_dur = sum(p["duration_sec"] for p in parsed)
     tot_cost = sum(p["cost_usd"] for p in parsed)
-    savings = summarize_savings(parsed, cfg)
+    savings = summarize_savings(parsed, cfg, _load_task_files(base))
     if as_json:
         total = {
             "count": len(parsed), "turns": tot_turns,
