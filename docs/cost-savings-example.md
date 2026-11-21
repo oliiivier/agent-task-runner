@@ -1,6 +1,6 @@
 # Mesurer le gain avec `agent-runner report`
 
-`agent-runner report` (et `report --json`) compare le coût réel d'un lot exécuté par `agent-runner` à deux scénarios de référence sur le modèle N3 de chaque runner (`opus` pour `claude`, `gemini-4-neon` pour `agy`, `gpt-5.5` pour `codex`).
+`agent-runner report` (et `report --json`) compare le coût réel d'un lot exécuté par `agent-runner` à deux scénarios de référence sur le modèle N3 de chaque runner (`opus` pour `claude`, `gemini-4-neon` pour `agy`, `gpt-6-luna` pour `codex`).
 
 ## Exemple réel sur un lot mixte de 46 tâches (`claude` + `agy`)
 

@@ -1,11 +1,11 @@
 """Adaptateur pour `codex exec` (OpenAI Codex CLI, flux `--json` : un événement JSON par ligne).
 
-Non vérifié sur une installation réelle au moment de l'écriture : options et format d'événements
-tirés de la documentation publique (`codex exec --help` fait foi). L'analyse est tolérante :
+Vérifié sur `codex-cli 0.171.0` :
 - dernier `agent_message` = résultat ; `turn.completed` = fin normale ; `turn.failed`/`error` = erreur ;
 - `max_turns` est approché en comptant les actions de l'agent (commandes, modifications, outils MCP) ;
-- `allowed_tools` et `max_budget_usd` ne sont pas transmis (pas d'équivalent) ; aucun coût n'est rapporté.
-La chaîne par défaut est à adapter aux modèles réellement proposés (`[escalation].codex`).
+- `allowed_tools` et `max_budget_usd` ne sont pas transmis (pas d'équivalent) ; aucun coût n'est rapporté ;
+- avec `permission != "bypass"`, `--sandbox workspace-write` monte `.git/` en lecture seule (bloque `git commit`).
+La chaîne par défaut cible les modèles exposés avec un compte ChatGPT (`[escalation].codex` à adapter si clé API).
 """
 
 from __future__ import annotations
@@ -16,41 +16,40 @@ import subprocess
 
 from .base import Adapter, AttemptResult, RunRequest
 
-# `max` n'existe pas chez Codex : ramené au niveau le plus élevé.
-EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
+EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"}
 ACTION_ITEMS = {"command_execution", "file_change", "mcp_tool_call", "web_search"}
 
 
 class CodexAdapter(Adapter):
     name = "codex"
     executable = "codex"
-    default_chain = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
+    default_chain = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-luna"]
     requires_result = True
     supports_allowed_tools = False
     supports_max_turns = True  # approché (actions d'agent comptées)
     supports_max_budget = False
     recommended_usage = "exécution standard OpenAI, sans restriction d'outils"
-    baseline_model = "gpt-5.5"
+    baseline_model = "gpt-6-luna"
     model_metadata = {
-        "gpt-5.4-mini": {
+        "gpt-5.6-luna": {
             "level": "N1",
-            "context": "128k",
+            "context": "272k",
             "cost": "$",
             "pricing": (0.40, 0.40, 0.10, 1.60),
             "desc": "tâches mécaniques, format, doc, scripts simples",
         },
-        "gpt-5.4": {
+        "gpt-5.6-terra": {
             "level": "N2",
-            "context": "256k",
+            "context": "272k",
             "cost": "$$",
             "pricing": (2.00, 2.00, 0.50, 8.00),
             "desc": "logique standard, nouvelles fonctions, refactor",
         },
-        "gpt-5.5": {
+        "gpt-6-luna": {
             "level": "N3",
-            "context": "256k",
+            "context": "272k",
             "cost": "$$$",
-            "pricing": (10.00, 10.00, 2.50, 40.00),
+            "pricing": (5.00, 5.00, 1.25, 20.00),
             "desc": "raisonnement avancé, architecture, diagnostic",
         },
     }
@@ -96,6 +95,7 @@ class CodexAdapter(Adapter):
             state.has_result = True
             usage = event.get("usage") or {}
             state.tokens_in += int(usage.get("input_tokens") or 0)
+            state.cache_write += int(usage.get("cache_write_input_tokens") or 0)
             state.cache_read += int(usage.get("cached_input_tokens") or 0)
             state.tokens_out += int(usage.get("output_tokens") or 0)
             state.final_json = event

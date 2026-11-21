@@ -182,7 +182,7 @@ Extraire `RemoteSyncBanner` depuis `ReaderScreen.kt` (lignes 1420 à 1790) vers 
 
 ### 4.5 bis. Runner optionnel `codex`
 
-`codex exec --json` (OpenAI Codex CLI) est pris en charge en option : absent ou non connecté, il est simplement indisponible et n'a aucun effet (il n'apparaît que dans `agent-runner models`). Chaîne par défaut `gpt-5.4-mini → gpt-5.4 → gpt-5.5`, à adapter dans `[escalation].codex`. `effort` est transmis via `-c model_reasoning_effort=…` (`max` → `xhigh`), `permission = "accept"` correspond à `--sandbox workspace-write`. `allowed_tools` et le budget ne sont pas transmis ; `max_turns` est approché en comptant les actions de l'agent (commandes, modifications de fichiers, outils). Connexion vérifiée par `codex login status` (ou `CODEX_API_KEY`/`OPENAI_API_KEY`).
+`codex exec --json` (OpenAI Codex CLI) est pris en charge en option : absent ou non connecté, il est simplement indisponible et n'a aucun effet (il n'apparaît que dans `agent-runner models`). Chaîne par défaut `gpt-5.6-luna → gpt-5.6-terra → gpt-6-luna` (modèles exposés avec un compte ChatGPT ; à adapter dans `[escalation].codex` pour une clé API). `effort` est transmis via `-c model_reasoning_effort=…` (`low` à `max`). `permission = "accept"` passe `--sandbox workspace-write` (qui monte `.git/` en lecture seule et bloque `git commit`), tandis que `permission = "bypass"` passe `--dangerously-bypass-approvals-and-sandbox`. `allowed_tools` et le budget ne sont pas transmis ; `max_turns` est approché en comptant les actions de l'agent (commandes, modifications de fichiers, outils). Connexion vérifiée par `codex login status` (ou `CODEX_API_KEY`/`OPENAI_API_KEY`).
 
 ### 4.6. Disponibilité des runners
 

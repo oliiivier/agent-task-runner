@@ -1235,13 +1235,19 @@ def cmd_run(args) -> int:
     check_fallback_map(cfg, tasks, args.catalogs)
     args.usage_cache = UsageCache(cfg, preference, status)
     all_unavailable = args.unavailable | {r for r, why in status.items() if why}
-    if cfg.get("permission") != "bypass" and any(
-        resolve_task_routing(t, cfg, all_unavailable, args.usage_cache.snapshot, avoid, preference)[0] == "agy"
-        and t.require_commit for t in tasks
-    ):
-        print(_ansi("33", 'avertissement : agy avec permission = "accept" bloque les commandes shell '
-                    '(git commit) sans règles permissions.allow dans settings.json ; utiliser '
-                    'permission = "bypass" si besoin.', sys.stderr), file=sys.stderr)
+    if cfg.get("permission") != "bypass":
+        routed = {
+            resolve_task_routing(t, cfg, all_unavailable, args.usage_cache.snapshot, avoid, preference)[0]
+            for t in tasks if t.require_commit
+        }
+        if "agy" in routed:
+            print(_ansi("33", 'avertissement : agy avec permission = "accept" bloque les commandes shell '
+                        '(git commit) sans règles permissions.allow dans settings.json ; utiliser '
+                        'permission = "bypass" si besoin.', sys.stderr), file=sys.stderr)
+        if "codex" in routed:
+            print(_ansi("33", 'avertissement : codex avec permission = "accept" monte .git/ en lecture seule '
+                        '(--sandbox workspace-write), bloquant git commit ; utiliser '
+                        'permission = "bypass" si besoin.', sys.stderr), file=sys.stderr)
     if args.dry_run:
         print_dry_run(tasks, cfg, args, status, avoid)
         return 0

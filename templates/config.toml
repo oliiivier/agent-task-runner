@@ -19,7 +19,7 @@ strict_allowed_tools = false   # true : pas de repli auto vers un runner qui ign
 [escalation]
 claude = ["haiku", "sonnet", "opus", "fable"]
 agy = ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon", "gemini-4-neon"]
-codex = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
+codex = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-luna"]
 
 # Modèles à ne jamais utiliser via un CLI (motifs fnmatch).
 [exclude_models]

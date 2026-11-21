@@ -559,9 +559,10 @@ class RoutingTests(Base):
         self.add_task("01-a.md", runner="codex", effort="max", fallback_runner="none")
         r = self.runner("run", FAKE_CODEX_LOGGED_IN="1")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn('codex avec permission = "accept"', r.stderr)
         call = self.calls()[0]
-        self.assertEqual((call["runner"], call["model"]), ("codex", "gpt-5.4-mini"))
-        self.assertIn("model_reasoning_effort=\"xhigh\"", call["argv"])
+        self.assertEqual((call["runner"], call["model"]), ("codex", "gpt-5.6-luna"))
+        self.assertIn('model_reasoning_effort="max"', call["argv"])
         self.assertIn("workspace-write", call["argv"])
         row = self.usage_rows()[0]
         self.assertEqual((row[4], row[6], row[7], row[9], row[10], row[-1]), ("codex", "1", "4", "2", "3", "success"))
@@ -569,7 +570,7 @@ class RoutingTests(Base):
         self.add_task("02-b.md", model="opus")
         r = self.runner("run", "--dry-run", FAKE_CODEX_LOGGED_IN="1", FAKE_CLAUDE_LOGGED_OUT="1",
                         FAKE_AGY_LOGGED_OUT="1")
-        self.assertIn("02-b.md  codex   gpt-5.4 -> gpt-5.5  (au lieu de claude, repli auto)", r.stdout)
+        self.assertIn("02-b.md  codex   gpt-5.6-terra -> gpt-6-luna  (au lieu de claude, repli auto)", r.stdout)
 
     def test_runners_config_disables_runner(self):
         cfg = self.repo / ".agent-tasks/config.toml"
