@@ -592,8 +592,8 @@ class RoutingTests(Base):
         self.assertIn("config `runners`", r.stderr)
 
     def test_map_model(self):
-        loader = SourceFileLoader("agent_runner", str(RUNNER))
-        spec = importlib.util.spec_from_loader("agent_runner", loader)
+        loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
+        spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         claude, agy = ["haiku", "sonnet", "opus", "fable"], ["flash", "pro", "ultra"]
@@ -602,10 +602,10 @@ class RoutingTests(Base):
         self.assertEqual(mod.map_model("sonnet", claude, agy, {"sonnet": "ultra"}), "ultra")
 
     def test_resolve_task_routing_pure(self):
-        loader = SourceFileLoader("agent_runner", str(RUNNER))
-        spec = importlib.util.spec_from_loader("agent_runner", loader)
+        loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
+        spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
         mod = importlib.util.module_from_spec(spec)
-        sys.modules["agent_runner"] = mod
+        sys.modules["agent_runner_bin"] = mod
         loader.exec_module(mod)
         from adapters.base import WindowQuota
 
@@ -719,10 +719,10 @@ class RoutingTests(Base):
 
 class FrontmatterTests(unittest.TestCase):
     def test_parse(self):
-        loader = SourceFileLoader("agent_runner", str(RUNNER))
-        spec = importlib.util.spec_from_loader("agent_runner", loader)
+        loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
+        spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
         mod = importlib.util.module_from_spec(spec)
-        sys.modules["agent_runner"] = mod
+        sys.modules["agent_runner_bin"] = mod
         loader.exec_module(mod)
         meta, body = mod.parse_frontmatter(textwrap.dedent('''\
             ---
@@ -750,10 +750,10 @@ class FrontmatterTests(unittest.TestCase):
 
 
 def load_runner_module():
-    loader = SourceFileLoader("agent_runner", str(RUNNER))
-    spec = importlib.util.spec_from_loader("agent_runner", loader)
+    loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
+    spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["agent_runner"] = mod
+    sys.modules["agent_runner_bin"] = mod
     loader.exec_module(mod)
     return mod
 
