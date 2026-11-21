@@ -267,6 +267,8 @@ class AgyAdapter(Adapter):
         return f"{family}-{nearest_effort(wanted, efforts)}"
 
     def build_command(self, req: RunRequest) -> list[str]:
+        self._seen_steps: set[int] = set()
+        self._step_usage: dict[int, dict] = {}
         cmd = [
             self.executable,
             "--print",
@@ -274,7 +276,7 @@ class AgyAdapter(Adapter):
             "--model",
             req.model,
             "--output-format",
-            "json",
+            "stream-json",
             "--print-timeout",
             f"{req.timeout_sec}s",
         ]
@@ -285,12 +287,39 @@ class AgyAdapter(Adapter):
         cmd += req.extra_args
         return cmd
 
+    def on_line(self, line: str, state: AttemptResult, req: RunRequest) -> bool:
+        line = line.strip()
+        if not line.startswith("{"):
+            return False
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        kind = event.get("event")
+        if kind == "step_update":
+            su = event.get("step_update") or {}
+            if su.get("step_type") == "agent_response" and su.get("state") == "DONE":
+                idx = su.get("step_index", state.turns)
+                if idx not in self._seen_steps:
+                    self._seen_steps.add(idx)
+                    state.turns += 1
+                if isinstance(su.get("usage"), dict):
+                    self._step_usage[idx] = su["usage"]
+        elif kind == "result":
+            res = event.get("result")
+            state.final_json = res if isinstance(res, dict) else event
+        return False
+
     def finalize(self, state: AttemptResult, lines: list[str], req: RunRequest) -> None:
         text = "".join(lines).strip()
         if HEADLESS_DENIED_RE.search(text):
             state.permission_denied = True
-        data = _extract_json(text)
+        data = state.final_json if state.final_json is not None else _extract_json(text)
         if data is None:
+            if getattr(self, "_step_usage", None):
+                state.tokens_in = sum(int(_first(u, "input_tokens", "prompt_tokens", "promptTokenCount")) for u in self._step_usage.values())
+                state.tokens_out = sum(int(_first(u, "output_tokens", "completion_tokens", "candidatesTokenCount")) for u in self._step_usage.values())
+                state.cache_read = sum(int(_first(u, "cache_read_input_tokens", "cache_read_tokens", "cachedContentTokenCount")) for u in self._step_usage.values())
             state.result_text = text[-2000:]
             return
         state.final_json = data
@@ -298,9 +327,9 @@ class AgyAdapter(Adapter):
         usage = data.get("usage") or data.get("usageMetadata") or {}
         state.tokens_in = int(_first(usage, "input_tokens", "prompt_tokens", "promptTokenCount"))
         state.tokens_out = int(_first(usage, "output_tokens", "completion_tokens", "candidatesTokenCount"))
-        state.cache_read = int(_first(usage, "cache_read_input_tokens", "cachedContentTokenCount"))
+        state.cache_read = int(_first(usage, "cache_read_input_tokens", "cache_read_tokens", "cachedContentTokenCount"))
         state.cache_write = int(_first(usage, "cache_creation_input_tokens"))
         state.cost_usd = float(_first(data, "total_cost_usd", "cost_usd", default=0.0))
-        state.turns = int(_first(data, "num_turns", "turns"))
+        state.turns = max(state.turns, int(_first(data, "num_turns", "turns")))
         state.result_text = str(_first(data, "result", "response", "text", default=""))
-        state.is_error = bool(data.get("is_error"))
+        state.is_error = bool(data.get("is_error") or str(data.get("status", "")).upper() in ("ERROR", "FAILED"))

@@ -961,6 +961,30 @@ class OperationsTests(Base):
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertEqual([p.name for p in (self.repo / ".agent-tasks/todo").glob("*.md")], ["03-c.md"])
 
+    def test_agy_stream_json_counts_turns_and_cache_read(self):
+        from adapters.agy import AgyAdapter
+        from adapters.base import AttemptResult, RunRequest
+        ad = AgyAdapter()
+        req = RunRequest(prompt="p", model="gemini-4-hydrogen-medium", cwd=ROOT,
+                         allowed_tools=[], max_turns=30, timeout_sec=60, max_budget_usd=None)
+        ad.build_command(req)
+        st = AttemptResult()
+        lines = [
+            json.dumps({"event": "step_update", "step_update": {"step_index": 1, "state": "DONE", "step_type": "agent_response"}}) + "\n",
+            json.dumps({"event": "step_update", "step_update": {"step_index": 2, "state": "DONE", "step_type": "agent_response"}}) + "\n",
+            json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": "DONE", "step_type": "agent_response"}}) + "\n",
+            json.dumps({"event": "result", "result": {"status": "SUCCESS", "num_turns": 1, "response": "done",
+                        "usage": {"input_tokens": 5000, "output_tokens": 200, "cache_read_tokens": 12000}}}) + "\n",
+        ]
+        for ln in lines:
+            ad.on_line(ln, st, req)
+        ad.finalize(st, lines, req)
+        self.assertEqual(st.turns, 3)
+        self.assertEqual(st.tokens_in, 5000)
+        self.assertEqual(st.tokens_out, 200)
+        self.assertEqual(st.cache_read, 12000)
+        self.assertEqual(st.result_text, "done")
+
     def test_merge_batch_and_dry_run(self):
         self.init()
         self.add_task("01-a.md", batch="alpha", branch="feat/alpha", merge_strategy="none")
