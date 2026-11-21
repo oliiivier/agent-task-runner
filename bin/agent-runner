@@ -23,7 +23,7 @@ TOOL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TOOL_ROOT))
 
 from agent_runner.adapters import ADAPTERS, RunRequest, get_adapter  # noqa: E402
-from agent_runner.adapters.logs import (  # noqa: E402
+from agent_runner.logs import (  # noqa: E402
     Style,
     collect_batch_task_ids,
     find_matching_logs,
