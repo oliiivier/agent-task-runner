@@ -885,13 +885,13 @@ class OperationsTests(Base):
         out = self.repo.parent / "hook.txt"
         cfg = self.repo / ".agent-tasks/config.toml"
         cmd = f'echo "$AGENT_RUNNER_STATUS $AGENT_RUNNER_EXIT_CODE $AGENT_RUNNER_DONE/$AGENT_RUNNER_TOTAL ' \
-              f'[$AGENT_RUNNER_FAILED_IDS]" >> {out}'
+              f'[$AGENT_RUNNER_FAILED_IDS] batch=$AGENT_RUNNER_BATCH branch=$AGENT_RUNNER_BRANCH" >> {out}'
         cfg.write_text(f"on_finish_cmd = {json.dumps(cmd)}\n" + cfg.read_text())
         self.add_task("01-a.md", branch="feat/a")
         self.add_task("02-b.md", branch="feat/b", escalate=False)
         r = self.runner("run", "--continue-on-error", FAKE_FAIL_MODELS="haiku")
         self.assertEqual(r.returncode, 1)
-        self.assertEqual(out.read_text(), "failure 1 1/2 [02-b]\n")
+        self.assertEqual(out.read_text(), "failure 1 1/2 [02-b] batch=default branch=feat/a feat/b\n")
         self.runner("run", "--dry-run")  # pas de hook en dry-run
         self.assertEqual(len(out.read_text().splitlines()), 1)
 
@@ -922,6 +922,12 @@ class OperationsTests(Base):
         self.assertNotIn("02-b", r_batch.stdout)
         r_last = self.runner("report", "--last", "1")
         self.assertIn("Total (1 tentative(s))", r_last.stdout)
+        r_json = self.runner("report", "--batch", "alpha", "--json")
+        self.assertEqual(r_json.returncode, 0, r_json.stderr)
+        payload = json.loads(r_json.stdout)
+        self.assertEqual(payload["total"]["count"], 2)
+        self.assertEqual([a["task_id"] for a in payload["attempts"]], ["01-a", "01-a"])
+        self.assertEqual(payload["attempts"][0]["batch"], "alpha")
 
     def test_merge_batch_and_dry_run(self):
         self.init()

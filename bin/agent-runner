@@ -1290,7 +1290,8 @@ def run_on_finish(root: Path, cfg: dict, rc: int | None, tasks: list[Task],
 
     AGENT_RUNNER_STATUS (success | failure | error), AGENT_RUNNER_EXIT_CODE (vide si interrompu),
     AGENT_RUNNER_TOTAL / _DONE / _FAILED (compteurs), AGENT_RUNNER_DONE_IDS / _FAILED_IDS (ids séparés
-    par des espaces), AGENT_RUNNER_REPO. Un échec du hook n'affecte pas le code retour du runner.
+    par des espaces), AGENT_RUNNER_BATCH / _BRANCH (valeurs uniques séparées par des espaces),
+    AGENT_RUNNER_REPO. Un échec du hook n'affecte pas le code retour du runner.
     """
     cmd = cfg.get("on_finish_cmd") or ""
     if not isinstance(cmd, str):
@@ -1298,6 +1299,8 @@ def run_on_finish(root: Path, cfg: dict, rc: int | None, tasks: list[Task],
         return
     if not cmd.strip():
         return
+    batches = list(dict.fromkeys(t.batch for t in tasks if t.batch))
+    branches = list(dict.fromkeys(t.branch for t in tasks if t.branch))
     env = {
         **os.environ,
         "AGENT_RUNNER_STATUS": "error" if rc is None else "success" if rc == 0 else "failure",
@@ -1307,6 +1310,8 @@ def run_on_finish(root: Path, cfg: dict, rc: int | None, tasks: list[Task],
         "AGENT_RUNNER_FAILED": str(len(failed)),
         "AGENT_RUNNER_DONE_IDS": " ".join(t.id for t in completed),
         "AGENT_RUNNER_FAILED_IDS": " ".join(t.id for t in failed),
+        "AGENT_RUNNER_BATCH": " ".join(batches),
+        "AGENT_RUNNER_BRANCH": " ".join(branches),
         "AGENT_RUNNER_REPO": str(root),
     }
     try:
@@ -1609,49 +1614,60 @@ def cmd_report(args) -> int:
     if not base.is_dir():
         raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
     usage = base / "logs" / "usage.tsv"
-    if not usage.exists():
-        print(_ansi("2", "Aucune exécution journalisée."))
-        return 0
-    rows = [ln.split("\t") for ln in usage.read_text().splitlines()[1:] if ln.strip()]
+    as_json = getattr(args, "json", False)
+    rows = [ln.split("\t") for ln in usage.read_text().splitlines()[1:] if ln.strip()] if usage.exists() else []
     if args.batch:
         rows = [r for r in rows if r[1] == args.batch]
     if args.last and args.last > 0:
         rows = rows[-args.last:]
     if not rows:
+        if as_json:
+            empty_tot = {"count": 0, "turns": 0, "tokens_in": 0, "cache_write": 0,
+                         "cache_read": 0, "tokens_out": 0, "cost_usd": 0.0, "duration_sec": 0}
+            print(json.dumps({"attempts": [], "total": empty_tot}, ensure_ascii=False, indent=2))
+            return 0
         print(_ansi("2", f"Aucune exécution journalisée" + (f" pour le lot {args.batch!r}." if args.batch else ".")))
         return 0
 
-    id_w = max(len("Tâche"), *(len(r[2]) for r in rows))
-    mod_w = max(len("Modèle"), *(len(f"{r[4]} {r[5]}") for r in rows))
+    tot_in = tot_cw = tot_cr = tot_out = tot_turns = tot_dur = 0
+    tot_cost = 0.0
+    parsed = []
+    for r in rows:
+        tin, tcw, tcr, tout = int(r[7]), int(r[8]), int(r[9]), int(r[10])
+        turns, cost, dur, st = int(r[6]), float(r[11]), int(float(r[12])), r[13]
+        tot_in += tin; tot_cw += tcw; tot_cr += tcr; tot_out += tout
+        tot_turns += turns; tot_cost += cost; tot_dur += dur
+        parsed.append({
+            "timestamp": r[0], "batch": r[1], "task_id": r[2], "attempt": int(r[3]),
+            "runner": r[4], "model": r[5], "turns": turns,
+            "tokens_in": tin, "cache_write": tcw, "cache_read": tcr, "tokens_out": tout,
+            "cost_usd": round(cost, 4), "duration_sec": dur, "status": st,
+        })
+    if as_json:
+        total = {
+            "count": len(parsed), "turns": tot_turns,
+            "tokens_in": tot_in, "cache_write": tot_cw, "cache_read": tot_cr, "tokens_out": tot_out,
+            "cost_usd": round(tot_cost, 4), "duration_sec": tot_dur,
+        }
+        print(json.dumps({"attempts": parsed, "total": total}, ensure_ascii=False, indent=2))
+        return 0
+
+    id_w = max(len("Tâche"), *(len(p["task_id"]) for p in parsed))
+    mod_w = max(len("Modèle"), *(len(f"{p['runner']} {p['model']}") for p in parsed))
     header = (f"{'Tâche':<{id_w}}  {'#':>2}  {'Modèle':<{mod_w}}  {'Tours':>5}  "
               f"{'Entrée':>9}  {'Cache W':>9}  {'Cache R':>9}  {'Sortie':>9}  {'Coût':>7}  {'Durée':>6}  Statut")
     print(_ansi("1", header))
     print(_ansi("2", "-" * len(header)))
-    tot_in = tot_cw = tot_cr = tot_out = tot_turns = tot_dur = 0
-    tot_cost = 0.0
-    for r in rows:
-        tin = int(r[7])
-        tcw = int(r[8])
-        tcr = int(r[9])
-        tout = int(r[10])
-        turns = int(r[6])
-        cost = float(r[11])
-        dur = int(float(r[12]))
-        st = r[13]
-        tot_in += tin
-        tot_cw += tcw
-        tot_cr += tcr
-        tot_out += tout
-        tot_turns += turns
-        tot_cost += cost
-        tot_dur += dur
+    for p in parsed:
+        st = p["status"]
         st_color = "1;32" if st == "success" else "33" if st in ("quota", "max_turns", "timeout") else "1;31"
-        model_col = f"{r[4]} {r[5]}"
-        print(f"{r[2]:<{id_w}}  {r[3]:>2}  {model_col:<{mod_w}}  {turns:>5}  "
-              f"{_fmt_int(tin):>9}  {_fmt_int(tcw):>9}  {_fmt_int(tcr):>9}  {_fmt_int(tout):>9}  "
-              f"${cost:>6.2f}  {_fmt_dur(dur):>6}  " + _ansi(st_color, st))
+        model_col = f"{p['runner']} {p['model']}"
+        print(f"{p['task_id']:<{id_w}}  {p['attempt']:>2}  {model_col:<{mod_w}}  {p['turns']:>5}  "
+              f"{_fmt_int(p['tokens_in']):>9}  {_fmt_int(p['cache_write']):>9}  {_fmt_int(p['cache_read']):>9}  "
+              f"{_fmt_int(p['tokens_out']):>9}  ${p['cost_usd']:>6.2f}  {_fmt_dur(p['duration_sec']):>6}  "
+              + _ansi(st_color, st))
     print(_ansi("2", "-" * len(header)))
-    summary = f"Total ({len(rows)} tentative(s))"
+    summary = f"Total ({len(parsed)} tentative(s))"
     print(_ansi("1", f"{summary:<{id_w + 6 + mod_w}}  {tot_turns:>5}  "
                      f"{_fmt_int(tot_in):>9}  {_fmt_int(tot_cw):>9}  {_fmt_int(tot_cr):>9}  "
                      f"{_fmt_int(tot_out):>9}  ${tot_cost:>6.2f}  {_fmt_dur(tot_dur):>6}"))
@@ -1811,6 +1827,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("report", help="détail par tentative (tokens, coût, durée, statut)")
     p.add_argument("--batch", help="filtre sur un lot")
     p.add_argument("--last", type=int, help="affiche les N dernières tentatives")
+    p.add_argument("--json", action="store_true", help="sortie structurée au format JSON")
     p.set_defaults(func=cmd_report)
     p = sub.add_parser("retry", help="remet une tâche (ou toutes avec --all) de failed/ dans todo/")
     p.add_argument("id", nargs="?")
