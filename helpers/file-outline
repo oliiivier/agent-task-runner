@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""file-outline : carte structurelle et numéros de lignes exacts d'un fichier."""
+from __future__ import annotations
+
+import argparse, ast, json, re, sys
+from pathlib import Path
+
+BRACE_EXTS = {".rs", ".kt", ".kts", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".c", ".cpp", ".h"}
+BRACE_RE = re.compile(
+    r"^(?:pub(?:\([^)]*\))?\s+|export\s+(?:default\s+)?|declare\s+|abstract\s+|async\s+|unsafe\s+|"
+    r"public\s+|private\s+|protected\s+|internal\s+|open\s+|final\s+|sealed\s+|data\s+|suspend\s+|"
+    r"inline\s+|static\s+|override\s+)*(fn|struct|enum|trait|impl|mod|class|interface|object|fun|func|function\*?)\b(.*)$"
+)
+HCL_RE = re.compile(r"^(terraform|provider|variable|locals|data|resource|module|output)\b[^{]*\{")
+HEREDOC_RE = re.compile(r"<<-?\s*([A-Za-z_]\w*)\s*$")
+SH_FN_RE = re.compile(r"^(?:function\s+([A-Za-z_][\w-]*)|([A-Za-z_][\w-]*)\s*\(\))\s*\{?")
+SQL_RE = re.compile(r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(TABLE|VIEW|FUNCTION|PROCEDURE|TRIGGER|INDEX)\s+([^\s(;]+)", re.I)
+MK_RE = re.compile(r"^([A-Za-z0-9_.-]+)\s*:(?!=)")
+
+
+def _py_outline(src: str, max_d: int) -> list[tuple[int, int, int, str]]:
+    out: list[tuple[int, int, int, str]] = []
+    def walk(body: list[ast.stmt], d: int) -> None:
+        if d > max_d:
+            return
+        for n in body:
+            if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                s, e = (n.decorator_list[0].lineno if n.decorator_list else n.lineno), (n.end_lineno or n.lineno)
+                if isinstance(n, ast.ClassDef):
+                    bases = f"({', '.join(ast.unparse(b) for b in n.bases)})" if n.bases else ""
+                    sig = f"class {n.name}{bases}"
+                else:
+                    kw = "async def" if isinstance(n, ast.AsyncFunctionDef) else "def"
+                    sig = f"{kw} {n.name}(...){f' -> {ast.unparse(n.returns)}' if n.returns else ''}"
+                out.append((d, s, e, sig))
+                walk(n.body, d + 1)
+    walk(ast.parse(src).body, 0)
+    return out
+
+
+def _strip_code(line: str, in_blk: bool, hash_cmt: bool) -> tuple[str, bool]:
+    res: list[str] = []
+    i, n, q = 0, len(line), None
+    while i < n:
+        c, nx = line[i], line[i + 1] if i + 1 < n else ""
+        if in_blk:
+            if c == "*" and nx == "/":
+                in_blk = False; res.append("  "); i += 2
+            else:
+                res.append(" "); i += 1
+        elif q:
+            if c == "\\" and i + 1 < n:
+                res.append("  "); i += 2
+            else:
+                if c == q: q = None
+                res.append(" "); i += 1
+        elif (c == "/" and nx == "/") or (hash_cmt and c == "#"):
+            break
+        elif c == "/" and nx == "*":
+            in_blk = True; res.append("  "); i += 2
+        elif c in ('"', "'", "`"):
+            q = c; res.append(" "); i += 1
+        else:
+            res.append(c); i += 1
+    return "".join(res), in_blk
+
+
+def _brace_outline(lines: list[str], mode: str, max_d: int) -> list[tuple[int, int, int, str]]:
+    out: list[tuple[int, int, int, str]] = []
+    stack: list[tuple[int, int | None]] = []
+    depth, in_blk, heredoc = 0, False, None
+    for ln, raw in enumerate(lines, 1):
+        if heredoc:
+            if raw.strip() == heredoc: heredoc = None
+            continue
+        clean, in_blk = _strip_code(raw, in_blk, mode in {"hcl", "sh"})
+        if mode == "hcl" and (hm := HEREDOC_RE.search(raw.split("#")[0].rstrip())):
+            heredoc = hm.group(1)
+        st, sig = clean.strip(), None
+        if st:
+            if mode == "brace" and (m := BRACE_RE.match(st)):
+                sig = f"{m.group(1)}{m.group(2)}".split("{")[0].rstrip(" ;")
+            elif mode == "hcl" and HCL_RE.match(raw.strip()):
+                sig = raw.strip().split("{")[0].strip()
+            elif mode == "sh" and (m := SH_FN_RE.match(st)):
+                sig = f"function {m.group(1) or m.group(2)}()"
+        matched: int | None = None
+        if sig and "{" in clean:
+            dd = sum(1 for _, idx in stack if idx is not None)
+            if dd <= max_d:
+                out.append((dd, ln, ln, sig)); matched = len(out) - 1
+        for ch in clean:
+            if ch == "{":
+                depth += 1; stack.append((depth, matched)); matched = None
+            elif ch == "}":
+                if stack and stack[-1][0] == depth:
+                    _, idx = stack.pop()
+                    if idx is not None:
+                        d, s, _, sg = out[idx]; out[idx] = (d, s, ln, sg)
+                depth = max(0, depth - 1)
+    return out
+
+
+def _yaml_outline(lines: list[str], max_d: int) -> list[tuple[int, int, int, str]]:
+    items: list[tuple[int, int, int, str]] = []
+    scalar_ind: int | None = None
+    for ln, raw in enumerate(lines, 1):
+        s = raw.rstrip(); ind = len(s) - len(s.lstrip(" ")); st = s.lstrip(" ")
+        if not st or st.startswith("#") or st in ("---", "..."): continue
+        if scalar_ind is not None:
+            if ind > scalar_ind: continue
+            scalar_ind = None
+        if m := re.match(r"^-\s+name:\s*(.+)$", st):
+            items.append((ind, 1 if ind > 0 else 0, ln, f"- name: {m.group(1).strip()}"))
+        elif m := re.match(r"^([A-Za-z0-9_.-]+)\s*:(?:\s+(.*))?$", st):
+            val = (m.group(2) or "").strip()
+            if val in ("|", "|-", "|+", ">", ">-", ">+"): scalar_ind = ind
+            if ind == 0 or (ind <= 4 and not val):
+                items.append((ind, 0 if ind == 0 else 1, ln, f"{m.group(1)}:"))
+    return [
+        (d, s, max(s, next((items[j][2] - 1 for j in range(i + 1, len(items)) if items[j][0] <= ind), len(lines))), sig)
+        for i, (ind, d, s, sig) in enumerate(items) if d <= max_d
+    ]
+
+
+def _md_outline(lines: list[str], max_d: int) -> list[tuple[int, int, int, str]]:
+    heads, fence = [], None
+    for ln, raw in enumerate(lines, 1):
+        st = raw.lstrip()
+        if fence:
+            if st.startswith(fence): fence = None
+            continue
+        if st.startswith(("```", "~~~")):
+            fence = st[:3]; continue
+        if m := re.match(r"^(#{1,4})\s+(.+?)\s*$", raw):
+            heads.append((len(m.group(1)), ln, f"{m.group(1)} {m.group(2)}"))
+    return [
+        (lvl - 1, s, max(s, next((heads[j][1] - 1 for j in range(i + 1, len(heads)) if heads[j][0] <= lvl), len(lines))), sig)
+        for i, (lvl, s, sig) in enumerate(heads) if lvl - 1 <= max_d
+    ]
+
+
+def _simple_outline(lines: list[str], mode: str, src: str) -> list[tuple[int, int, int, str]]:
+    if mode == "json":
+        obj = json.loads(src)
+        if not isinstance(obj, dict): return []
+        hits = sorted((ln, k) for k in obj for ln, r in enumerate(lines, 1) if re.match(rf'^\s*"{re.escape(k)}"\s*:', r))
+        return [(0, ln, (hits[i + 1][0] - 1 if i + 1 < len(hits) else len(lines)), f'"{k}"') for i, (ln, k) in enumerate(hits)]
+    if mode == "toml":
+        tabs = [(ln, r.split("#")[0].strip()) for ln, r in enumerate(lines, 1) if re.match(r"^\s*\[{1,2}[^\]]+\]{1,2}\s*(?:#.*)?$", r)]
+        return [(0, ln, (tabs[i + 1][0] - 1 if i + 1 < len(tabs) else len(lines)), t) for i, (ln, t) in enumerate(tabs)]
+    if mode == "mk":
+        tgts = [(ln, m.group(1)) for ln, r in enumerate(lines, 1) if (m := MK_RE.match(r)) and m.group(1) != ".PHONY"]
+        return [(0, ln, (tgts[i + 1][0] - 1 if i + 1 < len(tgts) else len(lines)), f"{t}:") for i, (ln, t) in enumerate(tgts)]
+    out, i = [], 0
+    while i < len(lines):
+        if m := SQL_RE.match(lines[i]):
+            s = i + 1
+            while i < len(lines) and ";" not in lines[i]: i += 1
+            out.append((0, s, min(i + 1, len(lines)), f"CREATE {m.group(1).upper()} {m.group(2)}"))
+        i += 1
+    return out
+
+
+def outline_file(path: Path, max_d: int) -> list[str]:
+    src = path.read_text(encoding="utf-8", errors="replace")
+    lines, ext, name = src.splitlines(), path.suffix.lower(), path.name
+    if not ext and lines and lines[0].startswith("#!"):
+        ext = ".py" if "python" in lines[0] else ".sh" if ("sh" in lines[0] or "bash" in lines[0]) else ""
+    if ext in {".py", ".pyw"}: entries = _py_outline(src, max_d)
+    elif ext in BRACE_EXTS: entries = _brace_outline(lines, "brace", max_d)
+    elif ext in {".tf", ".tfvars"}: entries = _brace_outline(lines, "hcl", max_d)
+    elif ext in {".sh", ".bash"}: entries = _brace_outline(lines, "sh", max_d)
+    elif ext in {".yml", ".yaml"}: entries = _yaml_outline(lines, max_d)
+    elif ext == ".md": entries = _md_outline(lines, max_d)
+    elif ext in {".toml", ".json", ".sql"} or name == "Makefile" or ext == ".mk":
+        entries = _simple_outline(lines, "mk" if (name == "Makefile" or ext == ".mk") else ext.lstrip("."), src)
+    else:
+        return [f"1-{len(lines)}  ({len(lines)} lignes)" if lines else "0-0  (0 lignes)"]
+    return [f"{s}-{e}  {'  ' * d}{sig}" for d, s, e, sig in entries] or [f"1-{len(lines)}  ({len(lines)} lignes)"]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="file-outline")
+    ap.add_argument("file"); ap.add_argument("--max-depth", type=int, default=4)
+    args = ap.parse_args(); p = Path(args.file)
+    if not p.is_file():
+        print(f"file-outline: fichier introuvable : {p}", file=sys.stderr); return 1
+    try:
+        for line in outline_file(p, args.max_depth): print(line)
+    except (OSError, SyntaxError, json.JSONDecodeError) as exc:
+        print(f"file-outline: {p}: {exc}", file=sys.stderr); return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

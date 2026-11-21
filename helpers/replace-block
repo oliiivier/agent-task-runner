@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""replace-block : remplace une plage de lignes d'un fichier par un fichier ou stdin.
+
+Usage : replace-block [--expected-lines N] [--anchor TEXT] <fichier> <début> <fin> [remplacement]
+
+  Remplace les lignes <début>..<fin> (1-indexées, bornes incluses) de <fichier>
+  par le contenu de [remplacement] (ou stdin si omis ou '-').
+  L'écriture est atomique via fichier temporaire ; en cas d'erreur ou de
+  vérification échouée, <fichier> reste intact.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+
+def write_atomic(path: Path, content: str) -> str:
+    """Écrit `content` dans un temporaire voisin de `path` et retourne son chemin."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    with os.fdopen(fd, "w", newline="") as fh:
+        fh.write(content)
+    os.chmod(tmp, path.stat().st_mode & 0o7777)
+    return tmp
+
+
+def read_lines(path: Path) -> list[str]:
+    """Lit un fichier sans traduire les fins de ligne."""
+    with path.open(newline="") as fh:
+        return fh.read().splitlines(keepends=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="replace-block", description=__doc__.split("\n\n")[0])
+    ap.add_argument("file", help="fichier cible à modifier")
+    ap.add_argument("start", type=int, help="première ligne à remplacer (1-indexée)")
+    ap.add_argument("end", type=int, help="dernière ligne à remplacer (incluse)")
+    ap.add_argument("replacement", nargs="?", default="-", help="fichier de remplacement ou '-' pour stdin")
+    ap.add_argument("--expected-lines", type=int, default=None, help="échoue si le fichier n'a pas exactement N lignes")
+    ap.add_argument("--anchor", default=None, help="texte devant apparaître dans la plage remplacée")
+    args = ap.parse_args()
+
+    target = Path(args.file)
+    if not target.is_file():
+        sys.exit(f"replace-block: fichier introuvable : {target}")
+
+    lines = read_lines(target)
+    if args.expected_lines is not None and len(lines) != args.expected_lines:
+        sys.exit(
+            f"replace-block: longueur incohérente pour {target} "
+            f"(attendu {args.expected_lines} lignes, trouvé {len(lines)})"
+        )
+    if not 1 <= args.start <= args.end <= len(lines):
+        sys.exit(
+            f"replace-block: plage invalide {args.start}-{args.end} "
+            f"(le fichier a {len(lines)} lignes)"
+        )
+
+    old_block = lines[args.start - 1 : args.end]
+    if args.anchor is not None and args.anchor not in "".join(old_block):
+        sys.exit(
+            f"replace-block: ancre {args.anchor!r} introuvable dans {target}:{args.start}-{args.end}"
+        )
+
+    if args.replacement == "-":
+        new_text = sys.stdin.read()
+    else:
+        rep_path = Path(args.replacement)
+        if not rep_path.is_file():
+            sys.exit(f"replace-block: fichier de remplacement introuvable : {rep_path}")
+        with rep_path.open(newline="") as fh:
+            new_text = fh.read()
+
+    new_block = new_text.splitlines(keepends=True)
+    if new_block and not new_block[-1].endswith("\n") and (args.end < len(lines) or old_block[-1].endswith("\n")):
+        new_block[-1] += "\n"
+
+    updated = lines[: args.start - 1] + new_block + lines[args.end :]
+    tmp = write_atomic(target, "".join(updated))
+    os.replace(tmp, target)
+    print(
+        f"replace-block: lignes {args.start}-{args.end} "
+        f"({len(old_block)} -> {len(new_block)} lignes) remplacées dans {target}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

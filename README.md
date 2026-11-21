@@ -11,7 +11,7 @@ Spécifications complètes : [`docs/specification.md`](docs/specification.md).
 Python 3.11+ (bibliothèque standard uniquement) et Git.
 
 ```bash
-./install.sh              # symlinks : ~/.local/bin/{agent-runner,move-lines}, ~/.claude/skills/plan-tasks, ~/.gemini/config/skills/plan-tasks
+./install.sh              # symlinks : ~/.local/bin/{agent-runner,move-lines,file-outline,replace-block}, skills dans ~/.claude/skills et ~/.gemini/config/skills
 ./install.sh --uninstall
 ```
 
@@ -45,6 +45,14 @@ dans .agent-tasks/todo/ (ne modifie aucun fichier de code source).
 - Privilégie `move-lines` pour les déplacements de blocs importants et fixe un `verify_cmd` rapide ciblé sur le module modifié.
 ```
 
+## Helpers déterministes
+
+Les helpers (`helpers/`, stdlib Python uniquement, installés dans `~/.local/bin`) remplacent des lectures ou réécritures coûteuses en tokens par des opérations atomiques et déterministes autorisables via `allowed_tools` :
+
+- **`file-outline <fichier> [--max-depth N]`** : extrait la carte structurelle et les plages de lignes exactes (Python, Rust, Kotlin, TS/JS, Go, Java, C/C++, Terraform/HCL, Ansible/YAML, Markdown, TOML, JSON, SQL, Makefile, Shell). Évite aux modèles (et à `plan-tasks`) de lire des fichiers entiers de 800+ lignes et élimine les hallucinations de numéros de lignes.
+- **`move-lines [--after N] <src> <début> <fin> <dst>`** : déplace un bloc de code d'un fichier à un autre sans le régénérer, ce qui économise les tokens de sortie, préserve le formatage exact et évite les erreurs de recopie sur les modèles légers.
+- **`replace-block [--expected-lines N] [--anchor TEXT] <fichier> <début> <fin> [remplacement]`** : remplace chirurgicalement une plage de lignes (via fichier ou `stdin`) avec écriture atomique et vérification de cohérence (`--expected-lines`, `--anchor`), évitant la réécriture complète d'un fichier ou les échecs d'indentation.
+
 ## Organisation
 
 | Chemin | Rôle |
@@ -52,7 +60,9 @@ dans .agent-tasks/todo/ (ne modifie aucun fichier de code source).
 | `bin/agent-runner` | CLI (`init`, `run`, `models`, `status`, `report`, `retry`, `clean`) |
 | `adapters/` | adaptateurs `claude` (flux `stream-json`, plafond `max_turns` appliqué par le runner) et `agy` |
 | `helpers/move-lines` | déplace une plage de lignes entre fichiers sans régénérer le code |
-| `skills/` | skill `plan-tasks`, commun à Claude Code et `agy` (même `SKILL.md`) |
+| `helpers/file-outline` | carte structurelle (classes, fonctions, méthodes) et numéros de lignes exacts |
+| `helpers/replace-block` | remplacement chirurgical d'une plage de lignes (avec garde-fous `--expected-lines` / `--anchor`) |
+| `skills/` | skills `plan-tasks`, `triage-failed` et `review-batch`, communs à Claude Code et `agy` |
 
 ## Tests
 

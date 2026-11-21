@@ -43,8 +43,8 @@ DEFAULTS: dict = {
     "auto_fallback": True,  # runners autorisés ; un runner absent de la liste est traité comme indisponible
     "default_verify_cmd": "",
     "default_allowed_tools": [
-        "Bash(git:*)", "Bash(move-lines:*)", "Bash(ls:*)", "Bash(grep:*)",
-        "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)",
+        "Bash(git:*)", "Bash(move-lines:*)", "Bash(file-outline:*)", "Bash(ls:*)",
+        "Bash(grep:*)", "Bash(wc:*)", "Bash(mkdir:*)", "Bash(cd:*)",
     ],
     "default_max_turns": 35,
     "default_timeout_sec": 900,
@@ -722,7 +722,8 @@ def build_prompt(task: Task, root: Path, k: int, prev: dict | None, partial: str
         "Crée UN seul commit, message en anglais au format conventionnel."
         if task.require_commit
         else "Ne crée aucun commit : cette tâche ne modifie pas le dépôt (audit/baseline).",
-        "Modifie les fichiers avec Edit/Write ; pour déplacer un gros bloc de lignes entre fichiers, "
+        "Modifie les fichiers avec Edit/Write ; pour repérer des plages de lignes sans lire un fichier entier, "
+        "utilise `file-outline <fichier>` ; pour déplacer un gros bloc de lignes entre fichiers, "
         "utilise `move-lines <src> <début> <fin> <dst>` plutôt que de réécrire le code.",
         "Ne touche jamais à .agent-tasks/ et n'écris rien hors du dépôt.",
         "Si tu es bloqué, ne commite rien de cassé et explique le blocage.",
@@ -1462,6 +1463,7 @@ def agent_rules_block() -> str:
         f"{RULES_BEGIN}\n"
         "## agent-task-runner\n\n"
         "- Ne modifie jamais `.agent-tasks/` (file de tâches gérée par `agent-runner`).\n"
+        "- Utilise `file-outline <fichier>` pour repérer les plages de lignes exactes avant de lire un fichier entier.\n"
         "- Pour déplacer un gros bloc de lignes (300+) entre fichiers, utilise "
         "`move-lines <src> <début> <fin> <dst>` au lieu de réécrire le code.\n"
         f"{RULES_END}\n"

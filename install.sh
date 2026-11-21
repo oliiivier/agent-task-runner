@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Installation globale par symlinks : ~/.local/bin (agent-runner, move-lines),
+# Installation globale par symlinks : ~/.local/bin (agent-runner, move-lines, file-outline, replace-block),
 # ~/.claude/skills, ~/.gemini/config/skills et, si Codex est installé, ~/.codex/skills
-# (skill plan-tasks, commun à tous les runners).
+# (skills plan-tasks, triage-failed, review-batch, communs à tous les runners).
 # Usage : ./install.sh [--uninstall]
 set -euo pipefail
 
@@ -11,16 +11,25 @@ CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 AGY_SKILLS_DIR="${AGY_SKILLS_DIR:-$HOME/.gemini/config/skills}"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
+SKILLS=(plan-tasks triage-failed review-batch)
 LINKS=(
   "$SRC/bin/agent-runner|$BIN_DIR/agent-runner"
   "$SRC/helpers/move-lines|$BIN_DIR/move-lines"
-  "$SRC/skills/plan-tasks|$CLAUDE_SKILLS_DIR/plan-tasks"
-  "$SRC/skills/plan-tasks|$AGY_SKILLS_DIR/plan-tasks"
+  "$SRC/helpers/file-outline|$BIN_DIR/file-outline"
+  "$SRC/helpers/replace-block|$BIN_DIR/replace-block"
 )
-# Codex est optionnel : on n'installe la skill que s'il a déjà été lancé (dossier de config présent).
+for sk in "${SKILLS[@]}"; do
+  LINKS+=(
+    "$SRC/skills/$sk|$CLAUDE_SKILLS_DIR/$sk"
+    "$SRC/skills/$sk|$AGY_SKILLS_DIR/$sk"
+  )
+done
+# Codex est optionnel : on n'installe les skills que s'il a déjà été lancé (dossier de config présent).
 # Relancer ./install.sh après avoir installé Codex suffit (installation idempotente).
 if [[ -d "$CODEX_HOME" || -L "$CODEX_HOME/skills/plan-tasks" ]]; then
-  LINKS+=("$SRC/skills/plan-tasks|$CODEX_HOME/skills/plan-tasks")
+  for sk in "${SKILLS[@]}"; do
+    LINKS+=("$SRC/skills/$sk|$CODEX_HOME/skills/$sk")
+  done
 fi
 
 if [[ "${1:-}" == "--uninstall" ]]; then
@@ -35,7 +44,7 @@ command -v python3 >/dev/null || { echo "python3 requis" >&2; exit 1; }
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo "Python 3.11+ requis" >&2; exit 1; }
 command -v git >/dev/null || { echo "git requis" >&2; exit 1; }
 
-chmod +x "$SRC/bin/agent-runner" "$SRC/helpers/move-lines"
+chmod +x "$SRC/bin/agent-runner" "$SRC/helpers/move-lines" "$SRC/helpers/file-outline" "$SRC/helpers/replace-block"
 for entry in "${LINKS[@]}"; do
   target="${entry%%|*}" dst="${entry#*|}"
   mkdir -p "$(dirname "$dst")"
