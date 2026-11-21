@@ -28,6 +28,7 @@ agent-runner run --dry-run                              # plan de routage, modè
 agent-runner run [--batch X] [--once | --limit N] [--resume] [--continue-on-error] [--model M] [--no-escalate] [--avoid-runner R]
 agent-runner status
 agent-runner report [--batch X] [--last N] [--json]
+agent-runner logs [<id>] [--batch X] [--file PATH] [-f|--stream] [--verify] [--raw]
 agent-runner retry <id>                                 # ou --all
 agent-runner merge [--batch X | --all] [--strategy no-ff|ff|squash] [--no-delete] [--force] [--dry-run]
 agent-runner clean [--all]
@@ -76,8 +77,8 @@ Les helpers (`helpers/`, stdlib Python uniquement, installés dans `~/.local/bin
 
 | Chemin | Rôle |
 | :--- | :--- |
-| `bin/agent-runner` | CLI (`init`, `create-plan`, `run`, `models`, `status`, `report`, `retry`, `merge`, `clean`) |
-| `adapters/` | adaptateurs `claude` (`stream-json`, `max_turns` et `allowed_tools`), `agy` et `codex` |
+| `bin/agent-runner` | CLI (`init`, `create-plan`, `run`, `models`, `status`, `report`, `logs`, `retry`, `merge`, `clean`) |
+| `adapters/` | adaptateurs `claude` (`stream-json`, `max_turns` et `allowed_tools`), `agy`, `codex` et rendu `logs` |
 | `helpers/move-lines` | déplace une plage de lignes entre fichiers sans régénérer le code |
 | `helpers/file-outline` | carte structurelle (classes, fonctions, méthodes) et numéros de lignes exacts |
 | `helpers/replace-block` | remplacement chirurgical d'une plage de lignes (avec garde-fous `--expected-lines` / `--anchor`) |
