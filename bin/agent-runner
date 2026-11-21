@@ -31,8 +31,6 @@ from agent_runner.logs import (  # noqa: E402
     stream_logs,
 )
 
-TASKS_DIR = ".agent-tasks"
-FAILURE_MARKER = "<!-- agent-runner:failure-report -->"
 RULES_BEGIN = "<!-- BEGIN agent-task-runner -->"
 RULES_END = "<!-- END agent-task-runner -->"
 USAGE_HEADER = [
@@ -83,8 +81,7 @@ DEFAULTS: dict = {
 }
 
 
-class Fail(Exception):
-    """Erreur fatale (message affiché, code retour 1)."""
+from agent_runner.task import FAILURE_MARKER, TASKS_DIR, Fail  # noqa: E402
 
 
 # --------------------------------------------------------------------------- Git
