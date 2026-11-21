@@ -30,23 +30,27 @@ class CodexAdapter(Adapter):
     supports_max_turns = True  # approché (actions d'agent comptées)
     supports_max_budget = False
     recommended_usage = "exécution standard OpenAI, sans restriction d'outils"
+    baseline_model = "gpt-5.5"
     model_metadata = {
         "gpt-5.4-mini": {
             "level": "N1",
             "context": "128k",
             "cost": "$",
+            "pricing": (0.40, 0.40, 0.10, 1.60),
             "desc": "tâches mécaniques, format, doc, scripts simples",
         },
         "gpt-5.4": {
             "level": "N2",
             "context": "256k",
             "cost": "$$",
+            "pricing": (2.00, 2.00, 0.50, 8.00),
             "desc": "logique standard, nouvelles fonctions, refactor",
         },
         "gpt-5.5": {
             "level": "N3",
             "context": "256k",
             "cost": "$$$",
+            "pricing": (10.00, 10.00, 2.50, 40.00),
             "desc": "raisonnement avancé, architecture, diagnostic",
         },
     }

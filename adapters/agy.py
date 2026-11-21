@@ -176,23 +176,27 @@ class AgyAdapter(Adapter):
     supports_max_turns = False
     supports_max_budget = False
     recommended_usage = "lecture transverse multi-fichiers, très large contexte (1M+), audits, économie de quota"
+    baseline_model = "gemini-4-neon"
     model_metadata = {
         "gemini-3.8-flash": {
             "level": "N1",
             "context": "1M+",
             "cost": "$",
+            "pricing": (0.15, 0.15, 0.0375, 0.60),
             "desc": "rapide, économique, grand contexte, doc/audits, mécanique",
         },
         "gemini-4-hydrogen": {
             "level": "N2",
             "context": "1M+",
             "cost": "$",
+            "pricing": (0.50, 0.50, 0.125, 2.00),
             "desc": "rapide, logique locale simple à modérée",
         },
         "gemini-4-argon": {
             "level": "N2+",
             "context": "1M+",
             "cost": "$$",
+            "pricing": (1.25, 1.25, 0.3125, 10.00),
             "quota_group": "argon",
             "premium": True,
             "desc": "logique avancée, refactor transverse multi-fichiers",
@@ -201,6 +205,7 @@ class AgyAdapter(Adapter):
             "level": "N3",
             "context": "1M+",
             "cost": "$$$",
+            "pricing": (2.50, 2.50, 0.625, 15.00),
             "premium": True,
             "desc": "raisonnement frontière, diagnostic, invariants complexes",
         },

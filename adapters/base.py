@@ -87,15 +87,28 @@ class Adapter:
     supports_max_budget = False  # le CLI supporte-t-il un plafond financier max_budget_usd ?
     supports_timeout = True  # timeout surveillé par le runner
     recommended_usage = ""
-    model_metadata: dict[str, dict[str, str]] = {}
+    baseline_model: str = ""
+    model_metadata: dict[str, dict[str, Any]] = {}
     exclude: list[str] = []  # motifs fnmatch de modèles à ne jamais utiliser via ce CLI
 
     def __init__(self, exclude: list[str] | None = None) -> None:
         self.exclude = list(exclude or [])
 
-    def get_model_info(self, model: str) -> dict[str, str] | None:
-        """Retourne les métadonnées {'level', 'context', 'cost', 'desc'} pour un modèle ou None."""
+    def get_model_info(self, model: str) -> dict[str, Any] | None:
+        """Retourne les métadonnées {'level', 'context', 'cost', 'desc', 'pricing'} pour un modèle ou None."""
         return self.model_metadata.get(model)
+
+    def get_model_pricing(self, model: str) -> tuple[float, float, float, float] | None:
+        """Retourne (in, cache_write, cache_read, out) en $/MTok pour `model`, ou None."""
+        info = self.get_model_info(model)
+        pricing = info.get("pricing") if info else None
+        return tuple(pricing) if pricing else None
+
+    @staticmethod
+    def estimate_cost(pricing: tuple[float, float, float, float],
+                      tokens_in: int, cache_write: int, cache_read: int, tokens_out: int) -> float:
+        p_in, p_cw, p_cr, p_out = pricing
+        return (tokens_in * p_in + cache_write * p_cw + cache_read * p_cr + tokens_out * p_out) / 1_000_000.0
 
     def get_usage_windows(self) -> list[WindowQuota] | None:
         """Fenêtres de consommation (session 5h, semaine 7j) si le fournisseur les expose."""

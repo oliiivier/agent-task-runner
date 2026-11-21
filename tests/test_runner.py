@@ -932,6 +932,7 @@ class OperationsTests(Base):
         self.assertEqual(payload["total"]["count"], 2)
         self.assertEqual([a["task_id"] for a in payload["attempts"]], ["01-a", "01-a"])
         self.assertEqual(payload["attempts"][0]["batch"], "alpha")
+        self.assertEqual(payload["savings"]["by_level"], {"N1": 1, "N2": 1, "N3": 0})
 
     def test_merge_batch_and_dry_run(self):
         self.init()

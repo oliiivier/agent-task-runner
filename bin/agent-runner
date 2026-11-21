@@ -1257,6 +1257,8 @@ def cmd_run(args) -> int:
     failed: list[Task] = []
     rc: int | None = None
     t0 = time.monotonic()
+    usage_file = root / TASKS_DIR / "logs" / "usage.tsv"
+    usage_start = len(usage_file.read_text().splitlines()) if usage_file.exists() else 1
     try:
         total = len(tasks)
         for i, task in enumerate(tasks):
@@ -1281,6 +1283,10 @@ def cmd_run(args) -> int:
                 parts.append(_ansi("1;31", f"{len(failed)} en échec"))
             parts.append(_ansi("2", _fmt_dur(time.monotonic() - t0)))
             print("\n" + _ansi("1", "Bilan :") + " " + ", ".join(parts))
+            if usage_file.exists():
+                run_rows = [ln.split("\t") for ln in usage_file.read_text().splitlines()[usage_start:] if ln.strip()]
+                if run_rows:
+                    _print_savings(summarize_savings([_row_to_attempt(r) for r in run_rows], cfg))
         run_on_finish(root, cfg, rc, tasks, completed, failed)
 
 
@@ -1607,12 +1613,73 @@ def cmd_status(args) -> int:
     return 0
 
 
+def _row_to_attempt(r: list[str]) -> dict:
+    return {
+        "timestamp": r[0], "batch": r[1], "task_id": r[2], "attempt": int(r[3]),
+        "runner": r[4], "model": r[5], "turns": int(r[6]),
+        "tokens_in": int(r[7]), "cache_write": int(r[8]), "cache_read": int(r[9]), "tokens_out": int(r[10]),
+        "cost_usd": round(float(r[11]), 4), "duration_sec": int(float(r[12])), "status": r[13],
+    }
+
+
+def summarize_savings(attempts: list[dict], cfg: dict) -> dict:
+    """Calcule la répartition par palier (N1/N2/N3) et le coût contrefactuel tout-N3."""
+    by_level = {"N1": 0, "N2": 0, "N3": 0}
+    actual_total = 0.0
+    baseline_total = 0.0
+    for a in attempts:
+        runner = a["runner"]
+        if runner in ADAPTERS:
+            adapter = adapter_for(runner, cfg)
+            info = adapter.get_model_info(a["model"]) or {}
+            lvl = (info.get("level") or "").rstrip("+")
+            if lvl in by_level:
+                by_level[lvl] += 1
+            p_actual = adapter.get_model_pricing(a["model"])
+            actual = a["cost_usd"] if a["cost_usd"] > 0 else (
+                adapter.estimate_cost(p_actual, a["tokens_in"], a["cache_write"], a["cache_read"], a["tokens_out"])
+                if p_actual else 0.0
+            )
+            p_base = adapter.get_model_pricing(adapter.baseline_model) if adapter.baseline_model else None
+            baseline = (
+                adapter.estimate_cost(p_base, a["tokens_in"], a["cache_write"], a["cache_read"], a["tokens_out"])
+                if p_base else actual
+            )
+        else:
+            actual = a["cost_usd"]
+            baseline = actual
+        actual_total += actual
+        baseline_total += baseline
+    saved = max(0.0, baseline_total - actual_total)
+    saved_pct = round(100.0 * saved / baseline_total, 1) if baseline_total > 0 else 0.0
+    return {
+        "by_level": by_level,
+        "actual_cost_usd": round(actual_total, 4),
+        "baseline_n3_cost_usd": round(baseline_total, 4),
+        "saved_usd": round(saved, 4),
+        "saved_pct": saved_pct,
+    }
+
+
+def _print_savings(sav: dict) -> None:
+    lvl = sav["by_level"]
+    dist = ", ".join(f"{lvl[k]} {k}" for k in ("N1", "N2", "N3") if lvl[k])
+    if dist:
+        print(_ansi("2", f"Paliers : {dist}"))
+    if sav["baseline_n3_cost_usd"] > 0 and sav["saved_usd"] > 0:
+        print(_ansi("2", f"Économie estimée : ${sav['actual_cost_usd']:.2f} réel vs "
+                         f"~${sav['baseline_n3_cost_usd']:.2f} en tout-N3 (-{sav['saved_pct']:.0f} %, "
+                         "borne basse à tokens identiques ; le gain réel est encore supérieur "
+                         "grâce à l'absence de cumul de contexte)"))
+
+
 def cmd_report(args) -> int:
     """Affiche le détail des tentatives journalisées dans usage.tsv."""
     root = repo_root()
     base = root / TASKS_DIR
     if not base.is_dir():
         raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    cfg = load_config(root)
     usage = base / "logs" / "usage.tsv"
     as_json = getattr(args, "json", False)
     rows = [ln.split("\t") for ln in usage.read_text().splitlines()[1:] if ln.strip()] if usage.exists() else []
@@ -1624,32 +1691,28 @@ def cmd_report(args) -> int:
         if as_json:
             empty_tot = {"count": 0, "turns": 0, "tokens_in": 0, "cache_write": 0,
                          "cache_read": 0, "tokens_out": 0, "cost_usd": 0.0, "duration_sec": 0}
-            print(json.dumps({"attempts": [], "total": empty_tot}, ensure_ascii=False, indent=2))
+            print(json.dumps({"attempts": [], "total": empty_tot, "savings": summarize_savings([], cfg)},
+                             ensure_ascii=False, indent=2))
             return 0
         print(_ansi("2", f"Aucune exécution journalisée" + (f" pour le lot {args.batch!r}." if args.batch else ".")))
         return 0
 
-    tot_in = tot_cw = tot_cr = tot_out = tot_turns = tot_dur = 0
-    tot_cost = 0.0
-    parsed = []
-    for r in rows:
-        tin, tcw, tcr, tout = int(r[7]), int(r[8]), int(r[9]), int(r[10])
-        turns, cost, dur, st = int(r[6]), float(r[11]), int(float(r[12])), r[13]
-        tot_in += tin; tot_cw += tcw; tot_cr += tcr; tot_out += tout
-        tot_turns += turns; tot_cost += cost; tot_dur += dur
-        parsed.append({
-            "timestamp": r[0], "batch": r[1], "task_id": r[2], "attempt": int(r[3]),
-            "runner": r[4], "model": r[5], "turns": turns,
-            "tokens_in": tin, "cache_write": tcw, "cache_read": tcr, "tokens_out": tout,
-            "cost_usd": round(cost, 4), "duration_sec": dur, "status": st,
-        })
+    parsed = [_row_to_attempt(r) for r in rows]
+    tot_in = sum(p["tokens_in"] for p in parsed)
+    tot_cw = sum(p["cache_write"] for p in parsed)
+    tot_cr = sum(p["cache_read"] for p in parsed)
+    tot_out = sum(p["tokens_out"] for p in parsed)
+    tot_turns = sum(p["turns"] for p in parsed)
+    tot_dur = sum(p["duration_sec"] for p in parsed)
+    tot_cost = sum(p["cost_usd"] for p in parsed)
+    savings = summarize_savings(parsed, cfg)
     if as_json:
         total = {
             "count": len(parsed), "turns": tot_turns,
             "tokens_in": tot_in, "cache_write": tot_cw, "cache_read": tot_cr, "tokens_out": tot_out,
             "cost_usd": round(tot_cost, 4), "duration_sec": tot_dur,
         }
-        print(json.dumps({"attempts": parsed, "total": total}, ensure_ascii=False, indent=2))
+        print(json.dumps({"attempts": parsed, "total": total, "savings": savings}, ensure_ascii=False, indent=2))
         return 0
 
     id_w = max(len("Tâche"), *(len(p["task_id"]) for p in parsed))
@@ -1671,6 +1734,7 @@ def cmd_report(args) -> int:
     print(_ansi("1", f"{summary:<{id_w + 6 + mod_w}}  {tot_turns:>5}  "
                      f"{_fmt_int(tot_in):>9}  {_fmt_int(tot_cw):>9}  {_fmt_int(tot_cr):>9}  "
                      f"{_fmt_int(tot_out):>9}  ${tot_cost:>6.2f}  {_fmt_dur(tot_dur):>6}"))
+    _print_savings(savings)
     return 0
 
 

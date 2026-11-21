@@ -88,23 +88,27 @@ class ClaudeAdapter(Adapter):
     supports_max_turns = True
     supports_max_budget = True
     recommended_usage = "édition chirurgicale, outillage restreint, boucles courtes compilation/test"
+    baseline_model = "opus"
     model_metadata = {
         "haiku": {
             "level": "N1",
             "context": "200k",
             "cost": "$",
+            "pricing": (0.80, 1.00, 0.08, 4.00),
             "desc": "tâches mécaniques, déplacements, format, doc, tests ciblés",
         },
         "sonnet": {
             "level": "N2",
             "context": "200k",
             "cost": "$$",
+            "pricing": (3.00, 3.75, 0.30, 15.00),
             "desc": "logique locale, 1 à 3 fichiers, nouvelles fonctions, refactor",
         },
         "opus": {
             "level": "N3",
             "context": "200k",
             "cost": "$$$",
+            "pricing": (15.00, 18.75, 1.50, 75.00),
             "premium": True,
             "desc": "architecture, invariants complexes, concurrence, code sensible",
         },
@@ -112,6 +116,7 @@ class ClaudeAdapter(Adapter):
             "level": "N3+",
             "context": "200k",
             "cost": "$$$$",
+            "pricing": (30.00, 37.50, 3.00, 150.00),
             "premium": True,
             "desc": "plafond d'escalade ultime, haute ambiguïté",
         },
