@@ -937,6 +937,30 @@ class OperationsTests(Base):
         self.assertIn("single_session_n3_cost_usd", payload["savings"])
         self.assertIn("avg_overlap_pct", payload["savings"])
 
+    def test_claude_credits_required_429_triggers_quota_fallback(self):
+        from adapters.base import Adapter, AttemptResult
+        ad = Adapter()
+        st = AttemptResult(
+            returncode=1, is_error=True, has_result=True,
+            result_text="Fable 5.2 requires usage credits.",
+            final_json={"api_error_status": 429, "api_error_code": "credits_required",
+                        "api_error_type": "rate_limit_error"},
+        )
+        self.assertTrue(ad.detect_quota(st, []))
+
+    def test_once_and_limit(self):
+        self.init()
+        self.add_task("01-a.md")
+        self.add_task("02-b.md")
+        self.add_task("03-c.md")
+        r1 = self.runner("run", "--once")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertEqual([p.name for p in (self.repo / ".agent-tasks/done").glob("*.md")], ["01-a.md"])
+        self.assertEqual(sorted(p.name for p in (self.repo / ".agent-tasks/todo").glob("*.md")), ["02-b.md", "03-c.md"])
+        r2 = self.runner("run", "--limit", "1")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual([p.name for p in (self.repo / ".agent-tasks/todo").glob("*.md")], ["03-c.md"])
+
     def test_merge_batch_and_dry_run(self):
         self.init()
         self.add_task("01-a.md", batch="alpha", branch="feat/alpha", merge_strategy="none")

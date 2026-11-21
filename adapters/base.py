@@ -67,7 +67,7 @@ class AttemptResult:
 # recherchées que dans les messages d'erreur du CLI, jamais dans le travail de l'agent.
 QUOTA_RE = re.compile(
     r"usage limit|hit your limit|rate[ _-]?limit|quota|resource[ _]exhausted|overloaded|"
-    r"too many requests|\b429\b|\b529\b",
+    r"too many requests|usage credits|credits_required|model_requires_usage_credits|\b429\b|\b529\b",
     re.IGNORECASE,
 )
 
@@ -227,8 +227,12 @@ class Adapter:
             return False
         if not (state.is_error or state.returncode != 0 or not state.has_result):
             return False
-        # Texte d'erreur final + lignes non-JSON de fin de sortie (stderr fusionné du CLI).
+        # Texte d'erreur final + champs d'erreur JSON + lignes non-JSON de fin de sortie (stderr fusionné).
         haystack = [state.result_text if state.is_error or state.returncode != 0 else ""]
+        if state.final_json and (state.is_error or state.returncode != 0):
+            for k in ("api_error_status", "api_error_type", "api_error_code", "api_error", "error"):
+                if state.final_json.get(k) is not None:
+                    haystack.append(str(state.final_json[k]))
         haystack += [ln for ln in lines[-30:] if not ln.lstrip().startswith("{")]
         return any(QUOTA_RE.search(h) for h in haystack if h)
 

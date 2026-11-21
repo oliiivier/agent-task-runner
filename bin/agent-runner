@@ -1210,8 +1210,15 @@ def cmd_run(args) -> int:
     tasks_dir = root / TASKS_DIR
     if not tasks_dir.is_dir():
         raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    if getattr(args, "once", False) and getattr(args, "limit", None) is not None:
+        raise Fail("utiliser --once ou --limit, pas les deux")
+    limit = 1 if getattr(args, "once", False) else getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        raise Fail("--limit doit être >= 1")
     cfg = load_config(root)
     tasks = load_queue(tasks_dir, cfg, args.batch)
+    if limit is not None:
+        tasks = tasks[:limit]
     if not tasks:
         print("Aucune tâche à exécuter.")
         return 0
@@ -2074,6 +2081,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--avoid-runner", action="append", choices=sorted(ADAPTERS), metavar="RUNNER",
                    help="bascule d'emblée sur leur runner de repli les tâches de ce runner (ex. quota presque plein) ; "
                         "répétable")
+    p.add_argument("--once", action="store_true", help="n'exécute que la prochaine tâche (équivalent à --limit 1)")
+    p.add_argument("--limit", type=int, help="exécute au plus N tâches")
     p.set_defaults(func=cmd_run)
     p = sub.add_parser("models", help="chaînes configurées et modèles disponibles (agy models)")
     p.add_argument("runner", nargs="?", choices=sorted(ADAPTERS))

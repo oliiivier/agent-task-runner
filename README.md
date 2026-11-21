@@ -25,7 +25,7 @@ agent-runner models [runner]                            # runners disponibles, c
 # générer les tâches avec le skill plan-tasks (interactif) ou en headless (un ou plusieurs documents) :
 agent-runner create-plan docs/cartographie.md docs/plan.md [--batch X] [--branch feat/x] [--base-branch main] [--runner R] [--model M] [--effort E]
 agent-runner run --dry-run                              # plan de routage, modèles résolus et chaînes d'escalade
-agent-runner run [--batch X] [--resume] [--continue-on-error] [--model M] [--no-escalate] [--avoid-runner R]
+agent-runner run [--batch X] [--once | --limit N] [--resume] [--continue-on-error] [--model M] [--no-escalate] [--avoid-runner R]
 agent-runner status
 agent-runner report [--batch X] [--last N] [--json]
 agent-runner retry <id>                                 # ou --all
