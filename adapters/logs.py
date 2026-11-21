@@ -629,7 +629,19 @@ def stream_logs(
         out.write("\n")
 
     current = initial_files[-1]
-    seen_files = set(initial_files)
+    current_mtime = current.stat().st_mtime
+    existing = find_matching_logs(logs_dir, target=target, batch_ids=batch_ids) if logs_dir is not None else initial_files
+    seen_mtimes: dict[Path, float] = {}
+    for p in existing:
+        try:
+            seen_mtimes[p] = p.stat().st_mtime
+        except OSError:
+            pass
+    for p in initial_files:
+        try:
+            seen_mtimes[p] = p.stat().st_mtime
+        except OSError:
+            pass
     verify_shown: set[Path] = set()
 
     def emit_verify_if_ready(path: Path) -> None:
@@ -649,6 +661,12 @@ def stream_logs(
     buf = ""
     try:
         while True:
+            try:
+                if os.fstat(fh.fileno()).st_size < fh.tell():
+                    fh.seek(0)
+                    buf = ""
+            except OSError:
+                pass
             chunk = fh.read()
             if chunk:
                 buf += chunk
@@ -657,13 +675,29 @@ def stream_logs(
                     for formatted in format_log_line(line, style, raw=raw):
                         out.write(formatted + "\n")
                 out.flush()
+                try:
+                    current_mtime = current.stat().st_mtime
+                    seen_mtimes[current] = current_mtime
+                except OSError:
+                    pass
                 continue
 
             emit_verify_if_ready(current)
 
             if follow_new and logs_dir is not None:
                 latest = find_matching_logs(logs_dir, target=target, batch_ids=batch_ids)
-                newer = [p for p in latest if p not in seen_files]
+                newer: list[Path] = []
+                for p in latest:
+                    if p == current:
+                        continue
+                    try:
+                        mt = p.stat().st_mtime
+                    except OSError:
+                        continue
+                    prev_mt = seen_mtimes.get(p)
+                    if prev_mt is None or mt > max(prev_mt, current_mtime):
+                        newer.append(p)
+                        seen_mtimes[p] = mt
                 if newer:
                     # Vide un éventuel reliquat sans newline avant de basculer.
                     if buf:
@@ -673,12 +707,15 @@ def stream_logs(
                     emit_verify_if_ready(current)
                     fh.close()
                     for skipped in newer[:-1]:
-                        seen_files.add(skipped)
                         out.write("\n")
                         render_logs_cold([skipped], style, raw=raw, include_verify=include_verify,
                                          use_pager=False, out=out)
                     current = newer[-1]
-                    seen_files.add(current)
+                    try:
+                        current_mtime = current.stat().st_mtime
+                        seen_mtimes[current] = current_mtime
+                    except OSError:
+                        pass
                     out.write("\n" + _format_file_header(current, style) + "\n")
                     out.flush()
                     fh = current.open("r", errors="replace")

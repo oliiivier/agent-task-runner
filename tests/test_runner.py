@@ -359,11 +359,16 @@ class RunTests(Base):
     def test_resume_injects_partial_work(self):
         self.git("checkout", "-q", "-b", "feat/x")
         (self.repo / "README.md").write_text("partial\n")
-        self.add_task("01-a.md")
+        (self.repo / ".agent-tasks/logs").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".agent-tasks/logs/01-a.try1-haiku.verify.log").write_text("error in build.log\n")
+        self.add_task("01-a.md", verify_cmd="true")
         r = self.runner("run", "--resume")
         self.assertEqual(r.returncode, 0, r.stderr)  # le faux agent commite le travail partiel
-        self.assertIn("REPRISE", self.calls()[0]["prompt"])
-        self.assertIn("README.md", self.calls()[0]["prompt"])
+        prompt = self.calls()[0]["prompt"]
+        self.assertIn("REPRISE", prompt)
+        self.assertIn("README.md", prompt)
+        self.assertIn(".agent-tasks/logs/01-a.try1-haiku.verify.log", prompt)
+        self.assertIn("quiet", prompt)
 
     def test_dry_run_changes_nothing(self):
         self.add_task("01-a.md", max_model="sonnet")

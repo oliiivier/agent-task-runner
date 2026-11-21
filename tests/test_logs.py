@@ -228,6 +228,42 @@ class LogsCliTests(unittest.TestCase):
             self.assertIn("02-task.try1-sonnet.log", out)
             self.assertIn("tâche suivante", out)
 
+    def test_stream_logs_ignores_older_files_and_detects_overwritten_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs_dir = Path(tmp)
+            now = time.time()
+            f_old = logs_dir / "00-old.try1-sonnet.log"
+            f_old.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "ancien log"}]}}) + "\n")
+            f_cur = logs_dir / "01-cur.try1-sonnet.log"
+            f_cur.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "log courant"}]}}) + "\n")
+            f_reused = logs_dir / "02-reused.try1-sonnet.log"
+            f_reused.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "vieux run"}]}}) + "\n")
+            os.utime(f_old, (now - 30, now - 30))
+            os.utime(f_reused, (now - 20, now - 20))
+            os.utime(f_cur, (now - 10, now - 10))
+
+            buf = io.StringIO()
+            stop = threading.Event()
+            t = threading.Thread(
+                target=stream_logs,
+                args=([f_cur], logs_dir),
+                kwargs={"style": Style(color=False), "poll_interval": 0.02, "out": buf, "stop_event": stop},
+                daemon=True,
+            )
+            t.start()
+            time.sleep(0.08)
+            # Simule un --resume qui réécrit 02-reused.try1-sonnet.log avec un mtime plus récent
+            f_reused.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "nouveau run"}]}}) + "\n")
+            os.utime(f_reused, (now + 5, now + 5))
+            time.sleep(0.1)
+            stop.set()
+            t.join(timeout=2)
+
+            out = buf.getvalue()
+            self.assertNotIn("ancien log", out)
+            self.assertIn("log courant", out)
+            self.assertIn("nouveau run", out)
+
 
 if __name__ == "__main__":
     unittest.main()
