@@ -41,7 +41,11 @@ for i in range(turns):
                       "usage": {"input_tokens": 4, "output_tokens": 2}}}), flush=True)
     if os.environ.get("FAKE_SLOW"):
         import time; time.sleep(0.2)
-if model in csv("FAKE_FAIL_MODELS"):
+if os.environ.get("FAKE_CREATE_TASK_FILE"):
+    open(os.environ["FAKE_CREATE_TASK_FILE"], "w").write(
+        "---\nid: 01-step\nbatch: alpha\nbranch: feat/alpha\nlevel: N1\n---\n## Objectif\nEtape 1.\n"
+    )
+elif model in csv("FAKE_FAIL_MODELS"):
     pass  # ne produit rien : pas de commit
 else:
     open(f"work-{n}.txt", "w").write(model)
@@ -52,7 +56,7 @@ if model in csv("FAKE_UNTRACKED_MODELS"):
 if model in csv("FAKE_DIRTY_MODELS"):
     open("README.md", "a").write("dirty\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": turns,
-                  "result": "ok", "total_cost_usd": 0.01,
+                  "result": os.environ.get("FAKE_RESULT_TEXT", "ok"), "total_cost_usd": 0.01,
                   "usage": {"input_tokens": 10, "cache_creation_input_tokens": 5,
                             "cache_read_input_tokens": 3, "output_tokens": 7}}))
 '''
@@ -950,6 +954,40 @@ class OperationsTests(Base):
         self.assertIn("merge(batch): alpha (2 task(s))", log_msg)
         self.assertIn("- 01-a: Faire 01-a.", log_msg)
         self.assertEqual(self.git("branch", "--list", "feat/alpha").strip(), "")
+
+    def test_create_plan_questions_rollback_and_success(self):
+        self.init()
+        plan = self.repo / "plan.md"
+        plan.write_text("# Plan\n\nDécouper le module.\n")
+        existing = self.repo / ".agent-tasks/todo/00-existing.md"
+        existing.write_text("---\nid: 00-existing\nbranch: feat/x\n---\n## Objectif\nExistant.\n")
+        # Cas 1 : l'agent pose des questions -> rollback des fiches partielles, conservation de 00-existing.md, code retour 2
+        q_reply = (
+            "<!-- agent-runner:questions -->\n"
+            "1. **Question** : REST ou GraphQL ?\n"
+            "   - Recommandation : REST pour rester cohérent.\n"
+            "<!-- /agent-runner:questions -->"
+        )
+        partial_task = self.repo / ".agent-tasks/todo/01-partial.md"
+        r_q = self.runner(
+            "create-plan", str(plan), "--batch", "alpha", "--branch", "feat/alpha",
+            FAKE_RESULT_TEXT=q_reply,
+            FAKE_CREATE_TASK_FILE=str(partial_task),
+        )
+        self.assertEqual(r_q.returncode, 2, r_q.stderr)
+        self.assertIn("REST ou GraphQL", r_q.stdout)
+        self.assertIn("Prompt à exécuter en session interactive", r_q.stdout)
+        self.assertEqual([p.name for p in (self.repo / ".agent-tasks/todo").glob("*.md")], ["00-existing.md"])
+
+        # Cas 2 : création réussie et validation des nouvelles fiches
+        good_task = self.repo / ".agent-tasks/todo/01-step.md"
+        r_ok = self.runner(
+            "create-plan", str(plan), "--batch", "alpha", "--branch", "feat/alpha",
+            FAKE_CREATE_TASK_FILE=str(good_task),
+        )
+        self.assertEqual(r_ok.returncode, 0, r_ok.stderr)
+        self.assertIn("1 fiche(s) créée(s) et validée(s)", r_ok.stdout)
+        self.assertTrue(good_task.exists())
 
     def test_merge_all_skips_incomplete_and_already_merged(self):
         self.init()

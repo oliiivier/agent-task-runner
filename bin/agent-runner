@@ -1788,6 +1788,113 @@ def cmd_merge(args) -> int:
     return 0
 
 
+def cmd_create_plan(args) -> int:
+    """Découpe un plan Markdown en fiches `.agent-tasks/todo/` via un agent headless."""
+    root = repo_root()
+    base = root / TASKS_DIR
+    if not base.is_dir():
+        raise Fail("`.agent-tasks/` introuvable : lancer `agent-runner init`")
+    if dirty(root):
+        raise Fail("arbre de travail non propre (fichiers suivis modifiés) : commit ou stash avant `create-plan`")
+    plan_path = Path(args.plan)
+    if not plan_path.is_absolute():
+        plan_path = (Path.cwd() / plan_path).resolve()
+    if not plan_path.is_file():
+        raise Fail(f"plan introuvable : {args.plan}")
+
+    cfg = load_config(root)
+    preference = enabled_runners(cfg)
+    statuses, catalogs = probe_runners(cfg, set(preference) | ({args.runner} if args.runner else set()))
+    runner = args.runner or cfg["default_runner"]
+    if statuses.get(runner):
+        avail = [r for r in preference if not statuses.get(r)]
+        if args.runner or not avail:
+            raise Fail(f"runner {runner!r} indisponible : {statuses.get(runner) or 'aucun runner disponible'}")
+        runner = avail[0]
+
+    adapter = adapter_for(runner, cfg)
+    model_name = args.model or level_models("N2", runner, cfg)[0] or cfg["escalation"][runner][0]
+    effort = args.effort or "medium"
+    model_id = adapter.resolve_model(model_name, effort, catalogs.get(runner))
+
+    skill_file = TOOL_ROOT / "skills" / "plan-tasks" / "SKILL.md"
+    skill_text = skill_file.read_text() if skill_file.is_file() else ""
+    constraints = []
+    if args.batch:
+        constraints.append(f"- `batch`: `{args.batch}`")
+    if args.branch:
+        constraints.append(f"- `branch`: `{args.branch}`")
+    if args.base_branch:
+        constraints.append(f"- `base_branch`: `{args.base_branch}`")
+    q_begin, q_end = "<!-- agent-runner:questions -->", "<!-- /agent-runner:questions -->"
+    prompt = (
+        f"Planifie le fichier `{plan_path}` en micro-tâches dans `.agent-tasks/todo/` en suivant "
+        f"strictement le skill `plan-tasks` ci-dessous.\n\n"
+        + ("Contraintes imposées :\n" + "\n".join(constraints) + "\n\n" if constraints else "")
+        + "## Protocole en cas d'ambiguïté (OBLIGATOIRE)\n"
+        "Si le plan comporte des ambiguïtés bloquantes ou des choix d'architecture non tranchés "
+        "qui t'empêchent de rédiger des fiches autonomes et sûres :\n"
+        "- NE CRÉE AUCUNE fiche dans `.agent-tasks/todo/` et ne modifie aucun fichier.\n"
+        f"- Réponds uniquement avec un bloc balisé `{q_begin} ... {q_end}` listant "
+        "chaque question numérotée suivie de `- Recommandation : ...`.\n\n"
+        f"## Instructions plan-tasks\n\n{skill_text}\n\n"
+        f"## Contenu du plan ({plan_path.name})\n\n{plan_path.read_text()}"
+    )
+
+    head_before = git("rev-parse", "HEAD", cwd=root).stdout.strip()
+    todo_dir = base / "todo"
+    todo_before = set(todo_dir.glob("*.md"))
+    logs = base / "logs"
+    logs.mkdir(exist_ok=True)
+    req = RunRequest(
+        prompt=prompt, model=model_id, cwd=root,
+        allowed_tools=list(cfg["default_allowed_tools"]) + ["Read", "Write", "Glob", "Grep"],
+        max_turns=30, timeout_sec=cfg["default_timeout_sec"], max_budget_usd=None,
+        permission_mode=cfg["permission"], effort=effort,
+        extra_args=list(cfg.get("extra_args", {}).get(runner, [])),
+    )
+    print(_ansi("1", f"create-plan : {plan_path.name} ({runner}/{model_id}, effort={effort})"))
+    res = adapter.run(req, logs / "create-plan.log", logs / "create-plan.json")
+
+    # Garde-fou code source : rollback Git si un fichier suivi/non-suivi hors .agent-tasks/ a été modifié.
+    if dirty(root) or git("rev-parse", "HEAD", cwd=root).stdout.strip() != head_before:
+        git("reset", "--hard", head_before, cwd=root)
+        git("clean", "-fd", "-e", TASKS_DIR, cwd=root)
+
+    def _rollback_todo() -> None:
+        for p in set(todo_dir.glob("*.md")) - todo_before:
+            p.unlink()
+
+    q_match = re.search(rf"{re.escape(q_begin)}(.*?){re.escape(q_end)}", res.result_text, re.S)
+    if q_match:
+        _rollback_todo()
+        questions = q_match.group(1).strip()
+        print(_ansi("1;33", "\ncreate-plan interrompu : l'agent a des questions avant de découper le plan.\n"))
+        print(questions)
+        opts = " ".join(f"--{k} {v}" for k, v in (("batch", args.batch), ("branch", args.branch), ("base-branch", args.base_branch)) if v)
+        print(_ansi("1", "\nPrompt à exécuter en session interactive (Claude / agy) :\n"))
+        print(f"Utilise le skill plan-tasks pour découper {plan_path} dans .agent-tasks/todo/ "
+              + (f"({opts}) " if opts else "")
+              + "en tenant compte des réponses suivantes :\n"
+              + "\n".join(ln for ln in questions.splitlines() if ln.strip()))
+        return 2
+
+    if res.error:
+        _rollback_todo()
+        raise Fail(f"create-plan : {res.error}")
+
+    new_files = sorted(set(todo_dir.glob("*.md")) - todo_before)
+    if not new_files:
+        raise Fail("create-plan : aucune fiche créée dans `.agent-tasks/todo/`.")
+
+    tasks = [parse_task(p, cfg) for p in new_files]
+    print(_ansi("1;32", f"\n{len(tasks)} fiche(s) créée(s) et validée(s) dans .agent-tasks/todo/ :"))
+    for t in tasks:
+        print(f"  - {t.path.name}  [level={t.level or '-'} branch={t.branch}]")
+    print(_ansi("2", "\nVérifie avec : agent-runner run --dry-run"))
+    return 0
+
+
 def cmd_clean(args) -> int:
     root = repo_root()
     base = root / TASKS_DIR
@@ -1845,6 +1952,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("clean", help="supprime logs/ (et done/ avec --all)")
     p.add_argument("--all", action="store_true")
     p.set_defaults(func=cmd_clean)
+    p = sub.add_parser("create-plan", help="découpe un plan Markdown en fiches todo/ (avec garde-fou questions)")
+    p.add_argument("plan", help="chemin vers le fichier plan Markdown")
+    p.add_argument("--batch", help="nom du lot imposé aux fiches")
+    p.add_argument("--branch", help="branche cible imposée aux fiches")
+    p.add_argument("--base-branch", help="branche de base (défaut : main)")
+    p.add_argument("--runner", choices=sorted(ADAPTERS), help="force un runner")
+    p.add_argument("--model", help="force un modèle")
+    p.add_argument("--effort", choices=EFFORTS, help="effort de raisonnement")
+    p.set_defaults(func=cmd_create_plan)
     return ap
 
 
