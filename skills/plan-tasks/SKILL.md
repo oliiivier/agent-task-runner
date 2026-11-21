@@ -52,7 +52,7 @@ Tu planifies ; tu n'exécutes pas. Chaque fiche sera exécutée plus tard par un
 | :--- | :--- | :--- | :---: | :---: |
 | **N1 — Mécanique** | `model: haiku`, `effort: low`, `max_model: sonnet` | `model: gemini-3.8-flash`, `effort: low`, `max_model: gemini-4-hydrogen` | 20 | 600 |
 | **N2 — Logique locale** | `model: sonnet`, `effort: medium`, `max_model: opus` | `model: gemini-4-hydrogen`, `effort: medium`, `max_model: gemini-4-argon` | 30 | 900 |
-| **N3 — Transverse / risqué** | `model: opus`, `effort: high`, `max_model: fable` | `model: gemini-4-neon`, `effort: high` (`xhigh` si très difficile) | 40 | 1500 |
+| **N3 — Transverse / risqué** | `model: opus`, `effort: high`, `max_model: fable` | `model: gemini-4-neon`, `effort: high` (`xhigh` si très difficile) | 60 | 1500 |
 | **Audit / baseline** | `model: sonnet`, `effort: low`, `escalate: false`, `require_commit: false` | `model: gemini-4-hydrogen`, `effort: low`, `escalate: false`, `require_commit: false` | 20 | 600 |
 
 * **`codex`** (optionnel, seulement s'il figure dans `runners disponibles`) : pas de colonne dédiée ; prends sa chaîne `[escalation].codex` affichée par `agent-runner models` — N1 = premier maillon, N2 = maillon médian, N3 = dernier (sans escalade possible : prévoir un repli) — avec les mêmes `effort`, `max_turns` et `timeout_sec` que la ligne du niveau. Comme `agy`, il ignore `allowed_tools` et le budget.
