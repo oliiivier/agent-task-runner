@@ -26,7 +26,7 @@ agent-task-runner/
 │   ├── queue.py, prompt.py       # File de tâches / validation ; construction des prompts
 │   ├── merge.py, probe.py        # Merge de lot ; détection des runners et catalogues de modèles
 │   ├── task.py, frontmatter.py   # Modèle de fiche, parsing, constantes partagées
-│   ├── config.py, gitutil.py, ui.py, logs.py, log_format.py
+│   ├── config.py, gitutil.py, ui.py, verify.py, logs.py, log_format.py
 │   └── adapters/                 # base.py (interface, chaînes d'escalade), claude.py, agy.py, codex.py (optionnel)
 ├── helpers/                      # move-lines, file-outline, replace-block (utilitaires atomiques)
 ├── skills/                       # plan-tasks, review-batch, triage-failed (SKILL.md)
@@ -104,6 +104,7 @@ Lorsqu'une tâche s'exécute :
 2. Si la tentative échoue (erreur CLI, timeout, `max_turns` atteint, arbre sale ou échec de `verify_cmd`) **et** que `escalate` est activé (défaut : `true`) :
    * Le runner identifie le **modèle suivant** dans la liste ordonnée du fournisseur (jusqu'à `max_model` si spécifié).
    * Le travail partiel déjà écrit sur la branche est **conservé** (comme pour un `--resume`), et le rapport d'erreur de la tentative précédente (extrait des logs ou sortie de `verify_cmd`) est injecté en tête du prompt pour que le modèle supérieur corrige directement le blocage sans refaire le travail déjà accompli.
+   * **Exception — `verify_cmd` en échec (y compris délai dépassé) :** avant d'escalader, le runner relance **le même modèle** jusqu'à `verify_retries` fois (défaut `1`), tant que le runner applique `max_turns` (`claude`, `codex` ; jamais `agy`) et qu'il reste au moins 8 tours sur le plafond `max_turns` (le reliquat sert de plafond à la correction : le budget n'est pas remis à zéro). Sur `claude`, la session de l'agent est reprise (`--session-id` puis `--resume`) avec un message court contenant la sortie de `verify_cmd` ; sinon une nouvelle session reçoit le diff et cette sortie. Sur un délai dépassé, le prompt invite à chercher un test bloqué ou un outil à redémarrer.
 3. Si le modèle atteint le sommet de la chaîne (ou `max_model`) et échoue encore, la tâche est déclarée en échec définitif.
 
 ### 4.2. Contrat du Frontmatter d'une tâche (`todo/NN-slug.md`)
@@ -127,6 +128,8 @@ Lorsqu'une tâche s'exécute :
 | `allowed_tools` | `list[str]`| Non | *profil défaut* | Liste blanche des outils autorisés en mode non interactif. |
 | `max_turns` | `int` | Non | `35` | Plafond de tours d'agent (évite les boucles de compilation coûteuses type 40+ tours ; déclenche l'escalade si dépassé). |
 | `timeout_sec` | `int` | Non | `900` | Délai maximal d'exécution d'une tentative en secondes. |
+| `verify_timeout_sec` | `int` | Non | `timeout_sec` | Délai propre à `verify_cmd` ; à l'expiration, tout son groupe de processus est tué (SIGTERM puis SIGKILL). |
+| `verify_retries` | `int` | Non | `1` (`default_verify_retries`) | Corrections sur le même modèle après un `verify_cmd` en échec, avant escalade (`0` : escalade directe). |
 | `max_budget_usd`| `float` | Non | `null` | Plafond financier optionnel transmis au CLI (`--max-budget-usd`). |
 
 ### 4.3. Exemple de fichier de tâche
@@ -218,9 +221,10 @@ Pour chaque fichier `todo/*.md` trié par ordre lexicographique (ignorant `.disa
         * **C1 — Exécution :** Processus terminé sans timeout ni dépassement `max_turns`, code retour `0` et `is_error == false`.
         * **C2 — Propreté Git :** Aucun fichier suivi modifié non commité (`git status --porcelain --untracked-files=no` vide).
         * **C3 — Progression :** Si `require_commit: true`, vérifier que `HEAD_AFTER != HEAD_BEFORE`.
-        * **C4 — Vérification métier :** Si `verify_cmd` est renseigné, exécuter la commande depuis la racine du dépôt et vérifier le code retour `0`.
+        * **C4 — Vérification métier :** Si `verify_cmd` est renseigné, exécuter la commande depuis la racine du dépôt, dans son propre groupe de processus et avec le délai `verify_timeout_sec`, et vérifier le code retour `0`.
      5. **Décision :**
         * Si `C1` à `C4` sont valides $\rightarrow$ sortir de la boucle en **Succès**.
+        * Si seul `C4` échoue et que les conditions de correction (§4.1) sont réunies $\rightarrow$ même modèle, session reprise, tentative `k + 1`.
         * Sinon, s'il reste un modèle supérieur dans la chaîne d'escalade $\rightarrow$ journaliser l'escalade (`haiku -> sonnet`) et passer à la tentative `k + 1` en conservant l'arbre partiel.
 
 3. **Transition d'état finale de la tâche :**

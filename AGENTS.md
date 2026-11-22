@@ -11,6 +11,7 @@
 - Merge de lot : `agent_runner/merge.py`
 - Détection runners / catalogues de modèles : `agent_runner/probe.py`
 - Formatage et affichage console : `agent_runner/ui.py`
+- Exécution de `verify_cmd` (groupe de processus, délai) : `agent_runner/verify.py`
 - Rendu et consultation des logs : `agent_runner/logs.py` (formatage Claude/Codex et `Style` : `agent_runner/log_format.py`)
 - Commandes CLI `agent-runner <cmd>` : `agent_runner/commands/<cmd>.py` (`status`, `retry`, `clean` dans `misc.py`)
 - Nouveau runner : `agent_runner/adapters/` (hériter de `base.py`) + déclarer dans `ADAPTERS`
@@ -18,7 +19,7 @@
 
 ## Règles d'architecture et dépendances
 - Ordre des couches (sans import circulaire) :
-  `cli > commands/* > execute, routing, merge, queue, prompt, probe > task, config, gitutil, frontmatter, ui`
+  `cli > commands/* > execute, routing, merge, queue, prompt, probe > task, config, gitutil, frontmatter, ui, verify`
 - Un module n'importe jamais une couche supérieure.
 - `adapters/*` ne dépend que de `adapters/base.py` et de la bibliothèque standard.
 - Imports paresseux des commandes dans `agent_runner/cli.py`.
