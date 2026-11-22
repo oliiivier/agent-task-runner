@@ -58,3 +58,25 @@ def check_models(cfg: dict, tasks: list[Task], catalogs: dict) -> None:
             if t.runner == runner and (t.model in missing or t.max_model in missing):
                 raise Fail(f"{t.path.name} : modèle {runner} indisponible ({t.model or t.max_model}) ; "
                            "corriger la fiche ou [escalation]")
+
+
+def check_fallback_map(cfg: dict, tasks: list[Task], catalogs: dict) -> None:
+    """Avertit si un repli probable cible un modèle absent de la chaîne ou du catalogue du runner de destination."""
+    warned: set[tuple[str, str]] = set()
+    for t in tasks:
+        alt = t.fallback_runner
+        if not alt:
+            continue
+        chain = cfg["escalation"].get(alt) or []
+        explicit = cfg.get("fallback_map", {}).get(alt) or {}
+        for m in filter(None, (t.model, t.max_model)):
+            target = explicit.get(m)
+            if target is None:
+                continue
+            problem = ("absent de [escalation]." + alt if target not in chain
+                       else "absent du catalogue" if alt in catalogs and not in_catalog(target, catalogs[alt])
+                       else "")
+            if problem and (alt, target) not in warned:
+                warned.add((alt, target))
+                print(f"avertissement : [fallback_map.{alt}] {m!r} -> {target!r} : {problem} "
+                      f"(rang équivalent utilisé à défaut)", file=sys.stderr)
