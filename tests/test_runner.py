@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -11,10 +10,16 @@ import tempfile
 import textwrap
 import tomllib
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from agent_runner import routing
+from agent_runner.config import DEFAULTS
+from agent_runner.frontmatter import parse_frontmatter
+from agent_runner.task import Task
+
 RUNNER = ROOT / "bin" / "agent-runner"
 MOVE = ROOT / "helpers" / "move-lines"
 
@@ -592,24 +597,15 @@ class RoutingTests(Base):
         self.assertIn("config `runners`", r.stderr)
 
     def test_map_model(self):
-        loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
-        spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
-        mod = importlib.util.module_from_spec(spec)
-        loader.exec_module(mod)
         claude, agy = ["haiku", "sonnet", "opus", "fable"], ["flash", "pro", "ultra"]
-        self.assertEqual([mod.map_model(m, claude, agy) for m in claude], ["flash", "pro", "pro", "ultra"])
-        self.assertEqual([mod.map_model(m, agy, claude) for m in agy], ["haiku", "opus", "fable"])
-        self.assertEqual(mod.map_model("sonnet", claude, agy, {"sonnet": "ultra"}), "ultra")
+        self.assertEqual([routing.map_model(m, claude, agy) for m in claude], ["flash", "pro", "pro", "ultra"])
+        self.assertEqual([routing.map_model(m, agy, claude) for m in agy], ["haiku", "opus", "fable"])
+        self.assertEqual(routing.map_model("sonnet", claude, agy, {"sonnet": "ultra"}), "ultra")
 
     def test_resolve_task_routing_pure(self):
-        loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
-        spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["agent_runner_bin"] = mod
-        loader.exec_module(mod)
         from agent_runner.adapters.base import WindowQuota
 
-        cfg = json.loads(json.dumps(mod.DEFAULTS))
+        cfg = json.loads(json.dumps(DEFAULTS))
         pref = ["agy", "claude"]
         healthy = {
             "agy": [WindowQuota("session (5h)", 15.0, reset_minutes=120.0)],
@@ -620,60 +616,60 @@ class RoutingTests(Base):
             defaults = {"path": Path("01-t.md"), "id": "01-t", "branch": "feat/t", "body": "",
                         "allowed_tools": ["Bash(git:*)"]}
             defaults.update(kw)
-            return mod.Task(**defaults)
+            return Task(**defaults)
 
         # 1. Préférence par niveau (N1->agy, N3->claude)
-        self.assertEqual(mod.resolve_task_routing(mk_task(level="N1"), cfg, set(), healthy, set(), pref),
+        self.assertEqual(routing.resolve_task_routing(mk_task(level="N1"), cfg, set(), healthy, set(), pref),
                          ("agy", "niveau N1"))
-        self.assertEqual(mod.resolve_task_routing(mk_task(level="N3"), cfg, set(), healthy, set(), pref),
+        self.assertEqual(routing.resolve_task_routing(mk_task(level="N3"), cfg, set(), healthy, set(), pref),
                          ("claude", "niveau N3"))
 
         # 2. Pin explicite respecté même si le seuil est dépassé
         over_claude = {"agy": healthy["agy"], "claude": [WindowQuota("session (5h)", 90.0, reset_minutes=120.0)]}
         self.assertEqual(
-            mod.resolve_task_routing(mk_task(level="N1", runner="claude", runner_pinned=True),
-                                     cfg, set(), over_claude, set(), pref),
+            routing.resolve_task_routing(mk_task(level="N1", runner="claude", runner_pinned=True),
+                                         cfg, set(), over_claude, set(), pref),
             ("claude", "pin"),
         )
 
         # 3. strict_allowed_tools force claude même en N1
         strict_cfg = json.loads(json.dumps(cfg))
         strict_cfg["strict_allowed_tools"] = True
-        self.assertEqual(mod.resolve_task_routing(mk_task(level="N1"), strict_cfg, set(), healthy, set(), pref),
+        self.assertEqual(routing.resolve_task_routing(mk_task(level="N1"), strict_cfg, set(), healthy, set(), pref),
                          ("claude", "contrainte allowed_tools"))
 
         # 4. max_budget_usd force claude même en N2
         self.assertEqual(
-            mod.resolve_task_routing(mk_task(level="N2", max_budget_usd=1.5), cfg, set(), healthy, set(), pref),
+            routing.resolve_task_routing(mk_task(level="N2", max_budget_usd=1.5), cfg, set(), healthy, set(), pref),
             ("claude", "contrainte budget"),
         )
 
         # 5. Seuil dépassé -> bascule sur l'alternative saine
-        runner, reason = mod.resolve_task_routing(mk_task(level="N3"), cfg, set(), over_claude, set(), pref)
+        runner, reason = routing.resolve_task_routing(mk_task(level="N3"), cfg, set(), over_claude, set(), pref)
         self.assertEqual(runner, "agy")
         self.assertIn("bascule (claude: session (5h) 90% >= 80%)", reason)
 
         # 6. Reset imminent (15m <= 20m et < 95%) relâche la contrainte
         imminent_claude = {"agy": healthy["agy"], "claude": [WindowQuota("session (5h)", 85.0, reset_minutes=15.0)]}
-        self.assertEqual(mod.resolve_task_routing(mk_task(level="N3"), cfg, set(), imminent_claude, set(), pref),
+        self.assertEqual(routing.resolve_task_routing(mk_task(level="N3"), cfg, set(), imminent_claude, set(), pref),
                          ("claude", "niveau N3"))
 
         # 7. Usage indisponible -> dégradation gracieuse vers préférence par niveau
         unknown = {"agy": None, "claude": None}
-        self.assertEqual(mod.resolve_task_routing(mk_task(level="N2"), cfg, set(), unknown, set(), pref),
+        self.assertEqual(routing.resolve_task_routing(mk_task(level="N2"), cfg, set(), unknown, set(), pref),
                          ("agy", "niveau N2, usage inconnu"))
 
         # 8. Runner indisponible -> repli propre
-        runner, reason = mod.resolve_task_routing(mk_task(level="N1"), cfg, {"agy"}, healthy, set(), pref)
+        runner, reason = routing.resolve_task_routing(mk_task(level="N1"), cfg, {"agy"}, healthy, set(), pref)
         self.assertEqual(runner, "claude")
         self.assertIn("indisponible", reason)
 
         # 9. prefer_runner oriente le choix mais bascule librement sur quota
         self.assertEqual(
-            mod.resolve_task_routing(mk_task(level="N2", prefer_runner="claude"), cfg, set(), healthy, set(), pref),
+            routing.resolve_task_routing(mk_task(level="N2", prefer_runner="claude"), cfg, set(), healthy, set(), pref),
             ("claude", "préférence claude (N2)"),
         )
-        runner, reason = mod.resolve_task_routing(
+        runner, reason = routing.resolve_task_routing(
             mk_task(level="N2", prefer_runner="claude"), cfg, set(), over_claude, set(), pref
         )
         self.assertEqual(runner, "agy")
@@ -687,20 +683,20 @@ class RoutingTests(Base):
             ],
             "claude": healthy["claude"],
         }
-        self.assertEqual(mod.resolve_task_routing(mk_task(level="N2"), cfg, set(), high_argon, set(), pref),
+        self.assertEqual(routing.resolve_task_routing(mk_task(level="N2"), cfg, set(), high_argon, set(), pref),
                          ("agy", "niveau N2"))
         self.assertEqual(
-            mod.candidate_models(mk_task(level="N2"), cfg, None, False, "agy", windows=high_argon["agy"]),
+            routing.candidate_models(mk_task(level="N2"), cfg, None, False, "agy", windows=high_argon["agy"]),
             ["gemini-4-hydrogen"],
         )
 
         # 11. allow_premium=False bride l'escalade vers les modèles premium (argon/neon/opus/fable)
         self.assertEqual(
-            mod.candidate_models(mk_task(level="N2", allow_premium=False), cfg, None, False, "agy"),
+            routing.candidate_models(mk_task(level="N2", allow_premium=False), cfg, None, False, "agy"),
             ["gemini-4-hydrogen"],
         )
         self.assertEqual(
-            mod.candidate_models(mk_task(level="N2", allow_premium=False), cfg, None, False, "claude"),
+            routing.candidate_models(mk_task(level="N2", allow_premium=False), cfg, None, False, "claude"),
             ["sonnet"],
         )
 
@@ -719,12 +715,7 @@ class RoutingTests(Base):
 
 class FrontmatterTests(unittest.TestCase):
     def test_parse(self):
-        loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
-        spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["agent_runner_bin"] = mod
-        loader.exec_module(mod)
-        meta, body = mod.parse_frontmatter(textwrap.dedent('''\
+        meta, body = parse_frontmatter(textwrap.dedent('''\
             ---
             id: 10-x
             # commentaire
@@ -746,22 +737,12 @@ class FrontmatterTests(unittest.TestCase):
                                 "allowed_tools": ["Bash(git:*)", "Bash(ls:*)"]})
         self.assertTrue(body.startswith("## Objectif"))
         with self.assertRaises(ValueError):
-            mod.parse_frontmatter("pas de frontmatter")
-
-
-def load_runner_module():
-    loader = SourceFileLoader("agent_runner_bin", str(RUNNER))
-    spec = importlib.util.spec_from_loader("agent_runner_bin", loader)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["agent_runner_bin"] = mod
-    loader.exec_module(mod)
-    return mod
+            parse_frontmatter("pas de frontmatter")
 
 
 class ParsingRobustnessTests(unittest.TestCase):
     def test_numeric_id_and_trailing_comments(self):
-        mod = load_runner_module()
-        meta, _ = mod.parse_frontmatter(textwrap.dedent('''\
+        meta, _ = parse_frontmatter(textwrap.dedent('''\
             ---
             id: 01
             batch: 7
