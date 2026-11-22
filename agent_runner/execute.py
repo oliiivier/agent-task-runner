@@ -81,7 +81,13 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
         git("checkout", task.branch, cwd=root)
     else:
         git("checkout", "-b", task.branch, task.base_branch, cwd=root)
-    head_before = git("rev-parse", "HEAD", cwd=root).stdout.strip()
+    current_head = git("rev-parse", "HEAD", cwd=root).stdout.strip()
+    head_file = logs / f"{task.id}.head"
+    head_before = current_head
+    if head_file.is_file():
+        saved = head_file.read_text().strip()
+        if saved and git("merge-base", "--is-ancestor", saved, current_head, cwd=root).returncode == 0:
+            head_before = saved
     partial = git("status", "--short", cwd=root).stdout.strip() if is_dirty else ""
 
     unavailable: set[str] = args.unavailable  # partagé entre tâches : un quota atteint vaut pour la suite
@@ -143,6 +149,7 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
                             sys.stderr), file=sys.stderr)
         attempts.append({"k": k, "model": f"{runner} {model_id}", "status": status, "reason": reason})
         if status == "success":
+            head_file.unlink(missing_ok=True)
             shutil.move(str(task.path), str(tasks_dir / "done" / task.path.name))
             return True
         agent_tail = ""
@@ -175,9 +182,12 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
 
     # Échec définitif
     if not args.continue_on_error:
+        if not head_file.exists():
+            head_file.write_text(head_before + "\n")
         print(_ansi("1;31", f"    ÉCHEC de {task.id} : tâche laissée dans todo/ avec l'état partiel (--resume pour reprendre).",
                     sys.stderr), file=sys.stderr)
         return False
+    head_file.unlink(missing_ok=True)
     git("reset", "--hard", head_before, cwd=root)
     git("clean", "-fd", "-e", TASKS_DIR, cwd=root)
     report = [f"\n{FAILURE_MARKER}", "## Rapport d'échec (agent-runner)", ""]

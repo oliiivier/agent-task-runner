@@ -371,6 +371,21 @@ class RunTests(Base):
         self.assertIn(".agent-tasks/logs/01-a.try1-haiku.verify.log", prompt)
         self.assertIn("quiet", prompt)
 
+    def test_resume_keeps_initial_head_before_across_retries(self):
+        flag = Path(self._tmp.name) / "flag"
+        self.add_task("01-a.md", verify_cmd=f"test -f {flag}", max_model="haiku")
+        head_file = self.repo / ".agent-tasks/logs/01-a.head"
+        initial = self.git("rev-parse", "HEAD").strip()
+        r = self.runner("run")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.listing("todo"), ["01-a.md"])
+        self.assertEqual(head_file.read_text().strip(), initial)
+        flag.write_text("ok")
+        r = self.runner("run", "--resume", FAKE_FAIL_MODELS="haiku")  # 2e run : aucun nouveau commit
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.listing("done"), ["01-a.md"])
+        self.assertFalse(head_file.exists())
+
     def test_dry_run_changes_nothing(self):
         self.add_task("01-a.md", max_model="sonnet")
         (self.repo / ".agent-tasks/todo/02-off.md.disabled").write_text("x")
