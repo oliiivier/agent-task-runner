@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -12,7 +11,7 @@ from agent_runner.adapters import ADAPTERS
 from agent_runner.config import DEFAULTS, load_config
 from agent_runner.gitutil import branch_exists, git, repo_root
 from agent_runner.probe import probe_runners
-from agent_runner.task import Fail, TASKS_DIR, TOOL_ROOT
+from agent_runner.task import Fail, TASKS_DIR, read_tool_resource
 
 RULES_BEGIN = "<!-- BEGIN agent-task-runner -->"
 RULES_END = "<!-- END agent-task-runner -->"
@@ -221,7 +220,7 @@ def cmd_init(args) -> int:
         (base / d).mkdir(parents=True, exist_ok=True)
     example = base / "todo" / "00-example.md.disabled"
     if not example.exists():
-        shutil.copy(TOOL_ROOT / "templates" / "example-task.md", example)
+        example.write_text(read_tool_resource("templates", "example-task.md"), encoding="utf-8")
 
     if args.gitignore:
         target = root / ".gitignore"

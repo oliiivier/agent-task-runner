@@ -10,7 +10,7 @@ from agent_runner.config import load_config
 from agent_runner.gitutil import dirty, git, repo_root
 from agent_runner.probe import enabled_runners, probe_runners
 from agent_runner.routing import adapter_for, level_models
-from agent_runner.task import TASKS_DIR, TOOL_ROOT, Fail, parse_task
+from agent_runner.task import TASKS_DIR, Fail, parse_task, read_tool_resource
 from agent_runner.ui import _ansi
 
 
@@ -46,8 +46,7 @@ def cmd_create_plan(args) -> int:
     effort = args.effort or "medium"
     model_id = adapter.resolve_model(model_name, effort, catalogs.get(runner))
 
-    skill_file = TOOL_ROOT / "skills" / "plan-tasks" / "SKILL.md"
-    skill_text = skill_file.read_text() if skill_file.is_file() else ""
+    skill_text = read_tool_resource("skills", "plan-tasks", "SKILL.md", default="")
     constraints = []
     if args.batch:
         constraints.append(f"- `batch`: `{args.batch}`")

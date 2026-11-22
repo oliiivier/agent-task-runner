@@ -3,11 +3,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import zipfile
 
 from agent_runner.adapters import ADAPTERS
 from agent_runner.frontmatter import parse_frontmatter
 
 TOOL_ROOT = Path(__file__).resolve().parent.parent
+
+
+def read_tool_resource(*parts: str, default: str | None = None) -> str:
+    """Lit une ressource embarquée (dépôt local ou archive zipapp)."""
+    path = TOOL_ROOT.joinpath(*parts)
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    if TOOL_ROOT.is_file() and zipfile.is_zipfile(TOOL_ROOT):
+        member = "/".join(parts)
+        with zipfile.ZipFile(TOOL_ROOT) as zf:
+            if member in zf.namelist():
+                return zf.read(member).decode("utf-8")
+    if default is not None:
+        return default
+    raise FileNotFoundError(f"Ressource introuvable : {'/'.join(parts)}")
 
 TASKS_DIR = ".agent-tasks"
 FAILURE_MARKER = "<!-- agent-runner:failure-report -->"
