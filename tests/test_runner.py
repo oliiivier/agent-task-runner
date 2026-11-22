@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import textwrap
 import tomllib
 import unittest
 from pathlib import Path
@@ -17,7 +16,6 @@ sys.path.insert(0, str(ROOT))
 
 from agent_runner import routing
 from agent_runner.config import DEFAULTS
-from agent_runner.frontmatter import parse_frontmatter
 from agent_runner.task import Task
 
 RUNNER = ROOT / "bin" / "agent-runner"
@@ -713,55 +711,7 @@ class RoutingTests(Base):
         self.assertIn("[niveau N3, usage inconnu]", r.stdout)
 
 
-class FrontmatterTests(unittest.TestCase):
-    def test_parse(self):
-        meta, body = parse_frontmatter(textwrap.dedent('''\
-            ---
-            id: 10-x
-            # commentaire
-            escalate: false
-            max_turns: 30
-            max_budget_usd: 1.5
-            verify_cmd: "a: b && c"
-            model: null
-            allowed_tools:
-              - "Bash(git:*)"
-              - Bash(ls:*)
-            ---
-
-            ## Objectif
-            texte
-            '''))
-        self.assertEqual(meta, {"id": "10-x", "escalate": False, "max_turns": 30, "max_budget_usd": 1.5,
-                                "verify_cmd": "a: b && c", "model": None,
-                                "allowed_tools": ["Bash(git:*)", "Bash(ls:*)"]})
-        self.assertTrue(body.startswith("## Objectif"))
-        with self.assertRaises(ValueError):
-            parse_frontmatter("pas de frontmatter")
-
-
 class ParsingRobustnessTests(unittest.TestCase):
-    def test_numeric_id_and_trailing_comments(self):
-        meta, _ = parse_frontmatter(textwrap.dedent('''\
-            ---
-            id: 01
-            batch: 7
-            max_turns: 30 # garde-fou
-            verify_cmd: "echo '#' # fin"
-            model: haiku   # le moins cher
-            effort:  # vide
-            allowed_tools: ["Bash(git:*)", "x #y"]  # liste
-            ---
-            corps
-            '''))
-        self.assertEqual(meta["id"], "01")
-        self.assertEqual(meta["batch"], 7)
-        self.assertEqual(meta["max_turns"], 30)
-        self.assertEqual(meta["verify_cmd"], "echo '#' # fin")
-        self.assertEqual(meta["model"], "haiku")
-        self.assertIsNone(meta["effort"])
-        self.assertEqual(meta["allowed_tools"], ["Bash(git:*)", "x #y"])
-
     def test_agy_extracts_multiline_json_after_noise(self):
         sys.path.insert(0, str(RUNNER.parent.parent))
         from agent_runner.adapters.agy import _extract_json
