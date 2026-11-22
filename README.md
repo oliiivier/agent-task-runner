@@ -90,7 +90,7 @@ Les helpers (`helpers/`, stdlib Python uniquement, installés dans `~/.local/bin
 python3 -m unittest discover -s tests -v
 ```
 
-Les tests (`tests/test_runner.py`, `tests/test_helpers.py`, `tests/test_file_outline.py`) utilisent des dépôts Git temporaires et un faux `claude` placé dans le `PATH`.
+Les tests (`tests/test_integration.py`, `tests/test_helpers.py`, `tests/test_file_outline.py`) utilisent des dépôts Git temporaires et un faux `claude` placé dans le `PATH`.
 
 ## Licence
 

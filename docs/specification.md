@@ -36,7 +36,7 @@ agent-task-runner/
 ├── schemas/
 │   └── task.schema.json          # Schéma JSON de validation du frontmatter YAML
 ├── tests/
-│   └── test_runner.py            # Tests d'intégration sur dépôts Git temporaires
+│   └── test_integration.py       # Tests d'intégration sur dépôts Git temporaires
 ├── README.md
 └── install.sh                    # Installation globale via symlinks (~/.local/bin, ~/.claude/skills, ~/.gemini/config/skills)
 ```
