@@ -19,7 +19,7 @@ Il repose sur quatre principes fondamentaux :
 agent-task-runner/
 ├── bin/
 │   └── agent-runner              # Point d'entrée exécutable (Python 3.11+ stdlib uniquement)
-├── adapters/
+├── agent_runner/adapters/
 │   ├── __init__.py
 │   ├── base.py                   # Interface commune des adaptateurs CLI et chaînes d'escalade
 │   ├── codex.py                  # Adaptateur optionnel pour `codex exec`

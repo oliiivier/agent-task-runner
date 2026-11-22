@@ -77,8 +77,9 @@ Les helpers (`helpers/`, stdlib Python uniquement, installés dans `~/.local/bin
 
 | Chemin | Rôle |
 | :--- | :--- |
-| `bin/agent-runner` | CLI (`init`, `create-plan`, `run`, `models`, `status`, `report`, `logs`, `retry`, `merge`, `clean`) |
-| `adapters/` | adaptateurs `claude` (`stream-json`, `max_turns` et `allowed_tools`), `agy`, `codex` et rendu `logs` |
+| `bin/agent-runner` | point d'entrée (≈ 15 lignes) |
+| `agent_runner/` | package (`cli.py`, `commands/`, `routing.py`, `execute.py`, `adapters/`, `logs.py`, …) |
+| `agent_runner/adapters/` | adaptateurs `claude` (`stream-json`, `max_turns` et `allowed_tools`), `agy`, `codex` |
 | `helpers/move-lines` | déplace une plage de lignes entre fichiers sans régénérer le code |
 | `helpers/file-outline` | carte structurelle (classes, fonctions, méthodes) et numéros de lignes exacts |
 | `helpers/replace-block` | remplacement chirurgical d'une plage de lignes (avec garde-fous `--expected-lines` / `--anchor`) |
