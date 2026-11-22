@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -323,12 +324,58 @@ class RunTests(Base):
 
     def test_verify_cmd_failure_triggers_escalation(self):
         verify = "test -f work-2.txt"  # n'existe qu'après la 2e invocation de l'agent
-        self.add_task("01-a.md", verify_cmd=verify, max_model="sonnet")
+        self.add_task("01-a.md", verify_cmd=verify, max_model="sonnet", verify_retries=0)
         r = self.runner("run")
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual([c["model"] for c in self.calls()], ["haiku", "sonnet"])
         self.assertIn("verify_cmd en échec", self.calls()[1]["prompt"])
         self.assertEqual([x[-1] for x in self.usage_rows()], ["verify_failed", "success"])
+        self.assertIn("--no-session-persistence", self.calls()[0]["argv"])
+
+    def test_verify_failure_retries_same_model_by_resuming_session(self):
+        self.add_task("01-a.md", verify_cmd="test -f work-2.txt", max_model="sonnet")
+        r = self.runner("run")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        first, second = self.calls()
+        self.assertEqual([first["model"], second["model"]], ["haiku", "haiku"])
+        self.assertNotIn("--no-session-persistence", first["argv"])
+        sid = first["argv"][first["argv"].index("--session-id") + 1]
+        self.assertEqual(second["argv"][second["argv"].index("--resume") + 1], sid)
+        self.assertIn("Il te reste environ", second["prompt"])
+        self.assertIn("verify_cmd en échec", second["prompt"])
+        self.assertIn("correction sur", r.stdout)
+        self.assertEqual([x[-1] for x in self.usage_rows()], ["verify_failed", "success"])
+
+    def test_verify_retry_skipped_when_turn_budget_is_nearly_spent(self):
+        self.add_task("01-a.md", verify_cmd="test -f work-2.txt", max_model="sonnet", max_turns=10)
+        r = self.runner("run", FAKE_TURNS="5")  # reste 5 tours < 8 : escalade directe
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual([c["model"] for c in self.calls()], ["haiku", "sonnet"])
+
+    def test_verify_retries_are_bounded_then_escalate(self):
+        self.add_task("01-a.md", verify_cmd="test -f work-3.txt", max_model="sonnet", verify_retries=1)
+        r = self.runner("run")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual([c["model"] for c in self.calls()], ["haiku", "haiku", "sonnet"])
+
+    def test_verify_timeout_kills_process_group_and_hints_agent(self):
+        pid_file = Path(self._tmp.name) / "orphan.pid"
+        verify = f"sleep 60 & echo $! > {pid_file}; wait"
+        self.add_task("01-a.md", verify_cmd=verify, verify_timeout_sec=1, escalate=False)
+        t0 = time.monotonic()
+        r = self.runner("run")
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertEqual(r.returncode, 1)
+        calls = self.calls()
+        self.assertEqual(len(calls), 2)  # 1 essai + 1 correction (même modèle)
+        self.assertIn("dépassé son délai (1 s)", calls[1]["prompt"])
+        self.assertIn("timeout après 1s", r.stdout + r.stderr)
+        pid = int(pid_file.read_text())
+        with self.assertRaises(ProcessLookupError):  # le descendant a été tué avec le groupe
+            for _ in range(20):
+                os.kill(pid, 0)
+                time.sleep(0.1)
+            os.kill(pid, 0)
 
     def test_dirty_tree_after_agent_fails_c2(self):
         self.add_task("01-a.md", escalate=False)
@@ -768,6 +815,9 @@ class RobustnessTests(Base):
         )
 
         class FakeMaxTurnsAdapter:
+            supports_resume = False
+            supports_max_turns = True
+
             def resolve_model(self, model, effort, catalog):
                 return model
 

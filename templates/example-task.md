@@ -21,6 +21,8 @@ escalate: true
 # Garde-fous
 max_turns: 30
 timeout_sec: 900
+# verify_timeout_sec: 600   # délai propre à verify_cmd (défaut : timeout_sec)
+# verify_retries: 1         # corrections sur le même modèle après un verify_cmd en échec (0 : escalade directe)
 require_commit: true
 # Commande exécutée par le runner après l'agent (code retour 0 exigé)
 verify_cmd: "git diff --quiet HEAD"

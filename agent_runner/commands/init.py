@@ -54,6 +54,7 @@ default_verify_cmd = {j(verify)}
 default_allowed_tools = {j(allowed, ensure_ascii=False)}
 default_max_turns = {DEFAULTS["default_max_turns"]}
 default_timeout_sec = {DEFAULTS["default_timeout_sec"]}
+default_verify_retries = {DEFAULTS["default_verify_retries"]}   # corrections sur le même modèle après un verify_cmd en échec (0 : escalade directe)
 permission = "accept"   # "accept" (acceptEdits) ou "bypass" (--dangerously-skip-permissions)
 strict_allowed_tools = false   # true : pas de repli auto vers un runner qui ignore allowed_tools (agy, codex)
 # on_finish_cmd = 'notify-send agent-runner "$AGENT_RUNNER_STATUS : $AGENT_RUNNER_DONE/$AGENT_RUNNER_TOTAL"'

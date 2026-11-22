@@ -40,6 +40,7 @@ FIELDS = {
     "id", "batch", "branch", "base_branch", "merge_strategy", "level", "runner", "prefer_runner",
     "fallback_runner", "model", "effort", "escalate", "allow_premium", "max_model", "verify_cmd",
     "require_commit", "allowed_tools", "max_turns", "timeout_sec", "max_budget_usd",
+    "verify_timeout_sec", "verify_retries",
 }
 
 
@@ -69,6 +70,8 @@ class Task:
     max_turns: int = 35
     timeout_sec: int = 900
     max_budget_usd: float | None = None
+    verify_timeout_sec: int | None = None  # délai de `verify_cmd` ; None : `timeout_sec`
+    verify_retries: int = 1  # corrections sur le même modèle après un `verify_cmd` en échec, avant escalade
 
 
 def parse_task(path: Path, cfg: dict) -> Task:
@@ -135,6 +138,8 @@ def parse_task(path: Path, cfg: dict) -> Task:
             max_turns=get("max_turns", cfg["default_max_turns"], int),
             timeout_sec=get("timeout_sec", cfg["default_timeout_sec"], int),
             max_budget_usd=get("max_budget_usd", None, float),
+            verify_timeout_sec=get("verify_timeout_sec", None, int),
+            verify_retries=get("verify_retries", cfg["default_verify_retries"], int),
         )
         if task.merge_strategy not in MERGE_STRATEGIES:
             raise ValueError(f"merge_strategy : {task.merge_strategy!r} (attendu : {', '.join(MERGE_STRATEGIES)})")
@@ -159,6 +164,10 @@ def parse_task(path: Path, cfg: dict) -> Task:
             raise ValueError(f"effort : {task.effort!r} (attendu : {', '.join(EFFORTS)})")
         if task.max_turns < 1 or task.timeout_sec < 1:
             raise ValueError("max_turns et timeout_sec doivent être >= 1")
+        if task.verify_timeout_sec is not None and task.verify_timeout_sec < 1:
+            raise ValueError("verify_timeout_sec doit être >= 1")
+        if task.verify_retries < 0:
+            raise ValueError("verify_retries doit être >= 0")
         chain = cfg["escalation"].get(task.runner) or []
         if task.max_model and chain and task.max_model not in chain:
             raise ValueError(f"max_model {task.max_model!r} absent de la chaîne {chain}")

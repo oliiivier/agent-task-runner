@@ -27,6 +27,8 @@ class RunRequest:
     permission_mode: str = "accept"  # "accept" | "bypass"
     effort: str | None = None  # low | medium | high | xhigh | max (None : défaut du CLI)
     extra_args: list[str] = field(default_factory=list)
+    session_id: str | None = None  # conserve la session sous cet identifiant (reprise ultérieure possible)
+    resume: bool = False  # True : reprend la session `session_id` au lieu d'en créer une
 
 
 @dataclass
@@ -84,6 +86,7 @@ class Adapter:
     default_chain: list[str] = []
     requires_result = True  # C1 exige un événement/objet de résultat final
     supports_allowed_tools = False  # le CLI applique-t-il `allowed_tools` (liste blanche d'outils) ?
+    supports_resume = False  # le CLI sait-il reprendre une session (`session_id` + `resume`) ?
     supports_max_turns = False  # le CLI applique-t-il ou permet-il d'appliquer max_turns ?
     supports_max_budget = False  # le CLI supporte-t-il un plafond financier max_budget_usd ?
     supports_timeout = True  # timeout surveillé par le runner

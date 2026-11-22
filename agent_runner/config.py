@@ -22,6 +22,8 @@ DEFAULTS: dict = {
     ],
     "default_max_turns": 35,
     "default_timeout_sec": 900,
+    # Corrections sur le même modèle (session reprise si possible) après un `verify_cmd` en échec, avant escalade.
+    "default_verify_retries": 1,
     "permission": "accept",  # "accept" (acceptEdits) | "bypass"
     # true : pas de repli automatique vers un runner qui n'applique pas `allowed_tools` (agy, codex).
     "strict_allowed_tools": False,

@@ -86,6 +86,7 @@ class ClaudeAdapter(Adapter):
     requires_result = True
     supports_allowed_tools = True
     supports_max_turns = True
+    supports_resume = True
     supports_max_budget = True
     recommended_usage = "édition chirurgicale, outillage restreint, boucles courtes compilation/test"
     baseline_model = "opus"
@@ -204,13 +205,16 @@ class ClaudeAdapter(Adapter):
             self.executable,
             "-p",
             req.prompt,
-            "--no-session-persistence",
             "--output-format",
             "stream-json",
             "--verbose",
             "--model",
             req.model,
         ]
+        if req.session_id:  # session conservée sur disque pour permettre `--resume`
+            cmd += ["--resume", req.session_id] if req.resume else ["--session-id", req.session_id]
+        else:
+            cmd.append("--no-session-persistence")
         if req.permission_mode == "bypass":
             cmd.append("--dangerously-skip-permissions")
         else:

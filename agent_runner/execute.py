@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_runner.gitutil import branch_exists, dirty, git, read_tail, untracked
-from agent_runner.prompt import build_prompt
+from agent_runner.prompt import build_prompt, build_resume_prompt
 from agent_runner.routing import adapter_for, candidate_models, level_models, map_model, resolve_task_routing
 from agent_runner.task import FAILURE_MARKER, TASKS_DIR, Fail, Task
 from agent_runner.ui import _ansi, _fmt_dur
+from agent_runner.verify import run_verify
 from agent_runner.adapters import RunRequest
+
+MIN_RETRY_TURNS = 8  # sous ce reliquat de tours, une correction sur le même modèle n'a plus de sens
 
 USAGE_HEADER = [
     "timestamp", "batch", "id", "try", "runner", "model", "turns", "tokens_in",
@@ -52,16 +55,11 @@ def evaluate(task: Task, root: Path, res, head_before: str, log_base: Path) -> t
     if task.require_commit and git("rev-parse", "HEAD", cwd=root).stdout.strip() == head_before:  # C3
         return "no_commit", "HEAD n'a pas avancé (require_commit=true)", ""
     if task.verify_cmd:  # C4
-        try:
-            proc = subprocess.run(task.verify_cmd, shell=True, cwd=root, capture_output=True,
-                                  text=True, errors="replace", timeout=task.timeout_sec)
-            out, rc = (proc.stdout + proc.stderr), proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            out = (exc.stdout or b"").decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            rc = None
+        limit = task.verify_timeout_sec or task.timeout_sec
+        out, rc = run_verify(task.verify_cmd, root, limit)
         Path(f"{log_base}.verify.log").write_text(out)
         if rc != 0:
-            why = "timeout" if rc is None else f"code retour {rc}"
+            why = f"timeout après {limit}s" if rc is None else f"code retour {rc}"
             return "verify_failed", f"verify_cmd en échec ({why}) : {task.verify_cmd}", tail(out)
     return "success", "", ""
 
@@ -109,10 +107,16 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
           + f" — {_ansi('32', runner)}{note} [{routing_reason}] : {' -> '.join(queue)}")
 
     k = 0
+    retry = False  # True : la tentative en cours corrige un verify_cmd en échec, sur le même modèle
+    turn_budget, retries_left, session_id = task.max_turns, task.verify_retries, None
     while queue:
         model = queue.pop(0)
         k += 1
-        if prev and prev["status"] != "quota":
+        if not retry:  # nouveau modèle : budget de tours, essais de correction et session repartent à zéro
+            turn_budget, retries_left, session_id = task.max_turns, task.verify_retries, None
+        if retry:
+            print(_ansi("36", f"    correction sur {prev['model']} (verify_cmd en échec, ~{turn_budget} tours restants)"))
+        elif prev and prev["status"] != "quota":
             print(_ansi("36", f"    escalade {prev['model']} -> {model}"))
         adapter = adapter_for(runner, cfg)
         try:
@@ -121,9 +125,16 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
             raise Fail(f"{task.id} : {exc}") from exc
         safe = re.sub(r"[^\w.-]", "_", f"{runner}-{model_id}" if runner != task.runner else model_id)
         log_base = logs / f"{task.id}.try{k}-{safe}"
+        resumed = retry and bool(session_id)
+        if adapter.supports_resume and task.verify_cmd and task.verify_retries > 0 and not retry:
+            session_id = str(uuid.uuid4())  # session conservée : une correction pourra la reprendre
+        prompt = (build_resume_prompt(task, prev, turn_budget) if resumed else
+                  build_prompt(task, root, k, prev, partial if k == 1 else "", head_before,
+                               retry_turns=turn_budget if retry else None))
         req = RunRequest(
-            prompt=build_prompt(task, root, k, prev, partial if k == 1 else "", head_before),
-            model=model_id, cwd=root, allowed_tools=task.allowed_tools, max_turns=task.max_turns,
+            prompt=prompt, session_id=session_id, resume=resumed,
+            model=model_id, cwd=root, allowed_tools=task.allowed_tools,
+            max_turns=turn_budget if retry else task.max_turns,
             timeout_sec=task.timeout_sec, max_budget_usd=task.max_budget_usd,
             permission_mode=cfg["permission"], effort=effective_effort,
             extra_args=list(cfg.get("extra_args", {}).get(runner, [])),
@@ -162,6 +173,13 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
                         '`permission = "bypass"` dans config.toml ou configurer permissions.allow dans settings.json.',
                         sys.stderr), file=sys.stderr)
             break
+        turn_budget -= res.turns
+        retry = (status == "verify_failed" and adapter.supports_max_turns and retries_left > 0
+                 and turn_budget >= MIN_RETRY_TURNS)
+        if retry:  # même modèle, avant toute escalade
+            retries_left -= 1
+            queue.insert(0, model)
+            continue
         if status == "quota":
             # Le fournisseur est saturé : inutile d'escalader chez lui. On bascule sur le repli en
             # reprenant au rang équivalent, et on le marque indisponible pour les tâches suivantes.
