@@ -17,28 +17,25 @@ Il repose sur quatre principes fondamentaux :
 
 ```text
 agent-task-runner/
-├── bin/
-│   └── agent-runner              # Point d'entrée exécutable (Python 3.11+ stdlib uniquement)
-├── agent_runner/adapters/
-│   ├── __init__.py
-│   ├── base.py                   # Interface commune des adaptateurs CLI et chaînes d'escalade
-│   ├── codex.py                  # Adaptateur optionnel pour `codex exec`
-│   ├── claude.py                 # Adaptateur pour `claude -p` (chaîne : haiku -> sonnet -> opus -> fable)
-│   └── agy.py                    # Adaptateur pour `agy` (chaîne configurable équivalente)
-├── helpers/
-│   └── move-lines                # Utilitaire atomique de déplacement de plages de lignes entre fichiers
-├── skills/
-│   └── plan-tasks/
-│       └── SKILL.md              # Skill de génération des tâches, commun à Claude Code et agy
-├── templates/
-│   ├── config.toml               # Modèle de configuration par projet
-│   └── example-task.md           # Exemple de tâche commenté
-├── schemas/
-│   └── task.schema.json          # Schéma JSON de validation du frontmatter YAML
-├── tests/
-│   └── test_integration.py       # Tests d'intégration sur dépôts Git temporaires
-├── README.md
-└── install.sh                    # Installation globale via symlinks (~/.local/bin, ~/.claude/skills, ~/.gemini/config/skills)
+├── bin/agent-runner              # Point d'entrée (≈ 15 lignes, délègue à agent_runner.cli)
+├── agent_runner/                 # Package Python 3.11+ (stdlib uniquement)
+│   ├── cli.py                    # Parser d'arguments, dispatch paresseux des commandes
+│   ├── commands/                 # Une commande = un module (run, init, models, logs, merge, report, create_plan, misc)
+│   ├── routing.py                # Routage par palier N1/N2/N3, escalade, quotas
+│   ├── execute.py                # Exécution d'une tentative et post-conditions
+│   ├── queue.py, prompt.py       # File de tâches / validation ; construction des prompts
+│   ├── merge.py, probe.py        # Merge de lot ; détection des runners et catalogues de modèles
+│   ├── task.py, frontmatter.py   # Modèle de fiche, parsing, constantes partagées
+│   ├── config.py, gitutil.py, ui.py, logs.py, log_format.py
+│   └── adapters/                 # base.py (interface, chaînes d'escalade), claude.py, agy.py, codex.py (optionnel)
+├── helpers/                      # move-lines, file-outline, replace-block (utilitaires atomiques)
+├── skills/                       # plan-tasks, review-batch, triage-failed (SKILL.md)
+├── templates/                    # config.toml, example-task.md
+├── schemas/task.schema.json      # Schéma JSON du frontmatter YAML
+├── docs/                         # specification, cost-savings-example, ticketing-integration, plans
+├── tests/                        # test_integration, test_routing, test_frontmatter, test_logs, test_resources, test_helpers, test_file_outline
+├── README.md, AGENTS.md, CLAUDE.md
+└── install.sh                    # Zipapp ~/.local/bin/agent-runner + symlinks helpers et skills
 ```
 
 ### Contraintes techniques et utilitaires inclus

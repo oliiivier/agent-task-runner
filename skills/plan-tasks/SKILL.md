@@ -10,18 +10,14 @@ Tu planifies ; tu n'exécutes pas. Chaque fiche sera exécutée plus tard par un
 ## Règles
 
 1. **Séparation des rôles.** Ne modifie AUCUN fichier de code source. Si `.agent-tasks/` est absent, lance `agent-runner init`. Écris uniquement des fiches `.agent-tasks/todo/NN-slug.md` (numérotation à 2 chiffres, ordre = ordre d'exécution).
-2. **Tâches autonomes et minimisation du contexte.** Le corps de chaque fiche contient l'extrait EXACT du plan, les numéros de lignes, les règles applicables à cette seule étape (`## Objectif`, `## Périmètre exact (fichiers et lignes à lire uniquement)`, `## Contexte extrait du plan`). Une fiche précise évite les lectures exploratoires coûteuses et permet à un modèle léger de réussir du premier coup. Si une tâche exige de lire > 4 fichiers, scinde-la ou pose `prefer_runner: agy` (fenêtre 1M+).
+2. **Tâches autonomes et minimisation du contexte.** Le corps de chaque fiche contient l'extrait EXACT du plan, les numéros de lignes, les règles applicables à cette seule étape (`## Objectif`, `## Périmètre exact (fichiers et lignes à lire uniquement)`, `## Contexte extrait du plan`). Une fiche précise évite les lectures exploratoires coûteuses et permet à un modèle léger de réussir du premier coup. Si une tâche exige de lire > 3 fichiers (`read_footprint: large`), scinde-la ou pose `prefer_runner: agy` (fenêtre 1M+).
 3. **Helpers déterministes (`file-outline`, `move-lines`, `replace-block`).**
    - Utilise `file-outline <fichier>` pendant la planification pour extraire les numéros de lignes exacts (plans Markdown, code, Terraform, Ansible) dans `## Périmètre exact` ; ajoute `"Bash(file-outline:*)"` à `allowed_tools` sur les fiches exploratoires.
    - Pour les déplacements de blocs, si `move-lines` est disponible, ajoute `"Bash(move-lines:*)"` à `allowed_tools` et demande explicitement `move-lines <src> <début> <fin> <dst>`.
    - Pour les remplacements chirurgicaux de blocs sur fichiers complexes/indentés, ajoute `"Bash(replace-block:*)"` à `allowed_tools` (`replace-block --expected-lines N <fichier> <début> <fin> -`).
 4. **Runners disponibles, capacités et validation des modèles.** Lance `agent-runner models` avant de générer les fiches.
    - **Disponibilité :** Sa première ligne (`runners disponibles : …`) fait foi : n'écris dans `runner` et `fallback_runner` **que des runners disponibles** (installés, connectés et autorisés par `runners` dans `config.toml`). Si un seul est disponible, utilise-le partout, n'écris pas de `fallback_runner` vers le runner absent (`none` reste valable pour interdire le repli) et ignore les consignes propres à l'autre runner ; signale à l'utilisateur le runner indisponible et son motif.
-   - **Capacités, fenêtres d'usage et profils :** `agent-runner models` affiche pour chaque runner :
-     1. Ses **fenêtres d'usage en direct** : `session (5h)` et `semaine (7j)` (taux d'utilisation en % et délai avant reset). **Critère hautement discriminant** pour éviter les blocages immédiats (HTTP 429).
-     2. Ses **capacités fonctionnelles** : `allowed_tools`, `max_turns`, `max_budget`, `timeout`.
-     3. Son **usage recommandé** et les fiches par modèle (`[Niveau | Contexte | Coût] : description`).
-     Prends impérativement en compte ces données pour décider du runner et du modèle de chaque fiche (voir *Choisir le runner et le repli*).
+   - **Capacités et fenêtres d'usage :** `agent-runner models` affiche pour chaque runner ses fenêtres d'usage en direct (`session (5h)`, `semaine (7j)` : critère discriminant contre les HTTP 429), ses capacités (`allowed_tools`, `max_turns`, `max_budget`, `timeout`) et ses modèles (`[Niveau | Contexte | Coût]`). Décide du runner et du modèle de chaque fiche d'après ces données (voir *Choisir le runner et le repli*).
    - **Validation de chaîne :** `model` et `max_model` doivent appartenir à la chaîne `[escalation]` du runner (sinon la fiche est rejetée). Pour `agy`, indique uniquement la **famille** (`gemini-4-argon`), `effort` compose la variante (`<famille>-<effort>`, ou l'effort disponible le plus proche — ex. `xhigh` devient `high` sur `argon`) ; n'écris jamais d'identifiant `claude-*` pour `agy` (quota très réduit).
 5. **Vérification rapide et ciblée (`verify_cmd`).** Fixe un `verify_cmd` rapide et limité au module modifié (sauf passe finale globale ou audit), pour qu'un échec soit détecté vite et relayé au modèle supérieur sans ralentir chaque tentative. Un agent qui tourne en rond est coupé par `max_turns` (claude) ou `timeout_sec` (agy). La fiabilité de `verify_cmd` conditionne le niveau.
 6. **Un commit par tâche** (`require_commit: true`, message en anglais, format conventionnel), sauf baseline/audit (`require_commit: false`).
@@ -95,8 +91,7 @@ Examine en premier lieu la ligne `fenêtres d'usage` renvoyée par `agent-runner
    - Tâche N3 sensible (sécurité, cryptographie, modifications critiques) nécessitant un confinement maximal.
 
 2. **`runner: agy` PRIVILÉGIÉ (large contexte ou économie de quotas)** :
-   - **Large contexte de lecture** : tâche nécessitant la lecture transverse de nombreux fichiers (> 3 fichiers), de la documentation complète, ou un audit de codebase (fenêtre 1M+ tokens évitant la saturation de contexte).
-   - **Économie de quotas Claude / FinOps** : délester les tâches mécaniques N1 (déplacements, renommage, documentation) vers `agy` (`gemini-3.8-flash` ou `gemini-4-hydrogen`) pour préserver les quotas de session/semaine de Claude.
+   - **Large contexte de lecture** (`read_footprint: large`, > 3 fichiers), documentation complète ou audit de codebase (fenêtre 1M+).
    - **`default_runner: agy`** configuré dans `.agent-tasks/config.toml` (respecte ce choix sauf si `allowed_tools` strict est exigé).
    - *Rappel :* Comme `agy` ignore `allowed_tools` et `max_turns`, fixe toujours un `timeout_sec` serré dès qu'une tâche peut tourner sur `agy` (nominal ou repli). Un N3 `agy` démarre déjà au sommet de sa chaîne (`gemini-4-neon`) : sans escalade interne possible, `fallback_runner: claude` est indispensable.
 

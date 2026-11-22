@@ -11,7 +11,7 @@ Spécifications complètes : [`docs/specification.md`](docs/specification.md).
 Python 3.11+ (bibliothèque standard uniquement) et Git.
 
 ```bash
-./install.sh              # symlinks : ~/.local/bin/{agent-runner,move-lines,file-outline,replace-block}
+./install.sh              # zipapp ~/.local/bin/agent-runner + symlinks des helpers (move-lines, file-outline, replace-block)
                           # skills dans ~/.claude/skills, ~/.gemini/config/skills (et ~/.codex/skills si Codex est présent)
 ./install.sh --uninstall
 ```
@@ -91,7 +91,7 @@ Les helpers (`helpers/`, stdlib Python uniquement, installés dans `~/.local/bin
 python3 -m unittest discover -s tests -v
 ```
 
-Les tests (`tests/test_integration.py`, `tests/test_helpers.py`, `tests/test_file_outline.py`) utilisent des dépôts Git temporaires et un faux `claude` placé dans le `PATH`.
+Les tests (`tests/test_*.py` : intégration, routage, frontmatter, logs, ressources, helpers) utilisent des dépôts Git temporaires et un faux `claude` placé dans le `PATH`.
 
 ## Licence
 

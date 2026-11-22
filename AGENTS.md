@@ -11,7 +11,7 @@
 - Merge de lot : `agent_runner/merge.py`
 - Détection runners / catalogues de modèles : `agent_runner/probe.py`
 - Formatage et affichage console : `agent_runner/ui.py`
-- Rendu et consultation des logs : `agent_runner/logs.py`
+- Rendu et consultation des logs : `agent_runner/logs.py` (formatage Claude/Codex et `Style` : `agent_runner/log_format.py`)
 - Commandes CLI `agent-runner <cmd>` : `agent_runner/commands/<cmd>.py` (`status`, `retry`, `clean` dans `misc.py`)
 - Nouveau runner : `agent_runner/adapters/` (hériter de `base.py`) + déclarer dans `ADAPTERS`
 - Point d'entrée CLI et parser d'arguments : `agent_runner/cli.py`
