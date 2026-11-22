@@ -128,14 +128,19 @@ def execute_task(root: Path, cfg: dict, task: Task, args, allow_dirty: bool, pro
         res = adapter.run(req, Path(f"{log_base}.log"), Path(f"{log_base}.json"))
         status, reason, verify_tail = evaluate(task, root, res, head_before, log_base)
         new_files = sorted(untracked(root) - untracked_before)
-        if new_files:
-            shown_files = ", ".join(new_files[:10]) + (f" (+{len(new_files) - 10})" if len(new_files) > 10 else "")
-            print(_ansi("33", f"    ! fichiers non suivis laissés par l'agent (oubli de `git add` ?) : {shown_files}",
-                        sys.stderr), file=sys.stderr)
         log_usage(logs, task, k, runner, model_id, res, status)
         st_color = "1;32" if status == "success" else "33" if status in ("quota", "max_turns", "timeout") else "1;31"
         metrics = f"(tours={res.turns}, coût=${res.cost_usd:.2f}, {_fmt_dur(res.duration_sec)})"
         print(f"    -> {_ansi(st_color, status)}" + (f" : {reason}" if reason else "") + "  " + _ansi("2", metrics))
+        if new_files:
+            shown_files = ", ".join(new_files[:10]) + (f" (+{len(new_files) - 10})" if len(new_files) > 10 else "")
+            if status in ("max_turns", "timeout", "quota", "error"):
+                if not args.continue_on_error:
+                    print(_ansi("2", f"    fichiers non suivis en cours (conservés pour --resume) : {shown_files}",
+                                sys.stderr), file=sys.stderr)
+            else:
+                print(_ansi("33", f"    ! fichiers non suivis laissés par l'agent (oubli de `git add` ?) : {shown_files}",
+                            sys.stderr), file=sys.stderr)
         attempts.append({"k": k, "model": f"{runner} {model_id}", "status": status, "reason": reason})
         if status == "success":
             shutil.move(str(task.path), str(tasks_dir / "done" / task.path.name))

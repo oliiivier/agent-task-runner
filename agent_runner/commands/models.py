@@ -45,7 +45,8 @@ def cmd_models(args) -> int:
                 parts.append(f"{w.name}: {_ansi(color, f'{w.utilization:.0f}%')}{reset_info}")
             print(_ansi("1;35", "  fenêtres d'usage : ") + " | ".join(parts))
         else:
-            print(_ansi("2", "  fenêtres d'usage : non disponible (nécessite un compte OAuth connecté)"))
+            reason = adapter.last_usage_error or "nécessite un compte OAuth connecté"
+            print(_ansi("2", f"  fenêtres d'usage : non disponible ({reason})"))
         tools_st = "oui" if adapter.supports_allowed_tools else "non"
         turns_st = "oui" if adapter.supports_max_turns and runner == "claude" else ("partiel" if runner == "codex" else "non")
         budget_st = "oui" if adapter.supports_max_budget else "non"

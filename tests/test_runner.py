@@ -855,6 +855,99 @@ class ImprovementTests(Base):
         self.assertEqual(len(self.calls()), 1)  # n'escalade pas inutilement chez agy
 
 
+class RobustnessTests(Base):
+    def test_post_result_grace_reaps_hung_child(self):
+        import time as _time
+        from unittest import mock
+        from agent_runner.adapters import base as adapter_base
+        from agent_runner.adapters.base import RunRequest
+        from agent_runner.adapters.claude import ClaudeAdapter
+
+        with tempfile.TemporaryDirectory() as d:
+            cwd = Path(d)
+            script = cwd / "hung_cli.py"
+            script.write_text(
+                "import json, sys, time\n"
+                "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                "'num_turns': 1, 'result': 'done', 'total_cost_usd': 0.01, "
+                "'usage': {'input_tokens': 1, 'output_tokens': 1}}), flush=True)\n"
+                "time.sleep(30)\n"
+            )
+
+            class HungClaude(ClaudeAdapter):
+                def build_command(self, req):
+                    return [sys.executable, str(script)]
+
+            req = RunRequest(prompt="p", model="haiku", cwd=cwd, timeout_sec=30)
+            with mock.patch.object(adapter_base, "POST_RESULT_GRACE_SEC", 0.2):
+                t0 = _time.monotonic()
+                res = HungClaude().run(req, cwd / "run.log", cwd / "run.json")
+                elapsed = _time.monotonic() - t0
+            self.assertLess(elapsed, 6.0)
+            self.assertFalse(res.timed_out)
+            self.assertTrue(res.has_result)
+            self.assertEqual(res.error, "")
+
+    def test_max_turns_with_untracked_files_shows_real_cause_first(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from types import SimpleNamespace
+        from unittest import mock
+        from agent_runner.adapters.base import AttemptResult
+        from agent_runner.config import load_config
+        from agent_runner.execute import execute_task
+        from agent_runner.queue import UsageCache, load_queue
+
+        self.init()
+        self.add_task("01-a.md", max_turns=1, escalate=False, fallback_runner="none")
+        cfg = load_config(self.repo)
+        task = load_queue(self.repo / ".agent-tasks", cfg, None)[0]
+        args = SimpleNamespace(
+            unavailable=set(), status={}, avoid_runner=[], preference=["claude"],
+            model=None, no_escalate=True, catalogs={}, continue_on_error=False,
+            usage_cache=UsageCache(cfg, ["claude"], {"claude": None}),
+        )
+
+        class FakeMaxTurnsAdapter:
+            def resolve_model(self, model, effort, catalog):
+                return model
+
+            def run(self, req, log_path, json_path):
+                (req.cwd / "wip.txt").write_text("partial")
+                log_path.write_text("log\n")
+                return AttemptResult(
+                    returncode=0, max_turns_hit=True, turns=2,
+                    error="plafond de 1 tours atteint, agent interrompu avant de terminer",
+                )
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("agent_runner.execute.adapter_for", return_value=FakeMaxTurnsAdapter()):
+            with redirect_stdout(out), redirect_stderr(err):
+                ok = execute_task(self.repo, cfg, task, args, allow_dirty=False)
+        self.assertFalse(ok)
+        self.assertIn("plafond de 1 tours atteint", out.getvalue())
+        self.assertIn("fichiers non suivis en cours", err.getvalue())
+        self.assertIn("wip.txt", err.getvalue())
+        self.assertNotIn("oubli de `git add`", err.getvalue())
+
+    def test_claude_usage_windows_sets_last_usage_error_on_http_error(self):
+        import urllib.error
+        from unittest import mock
+        from agent_runner.adapters.claude import ClaudeAdapter
+
+        adapter = ClaudeAdapter()
+        http_err = urllib.error.HTTPError("https://api.anthropic.com/api/oauth/usage", 429, "Too Many Requests", {}, None)
+        try:
+            with mock.patch("agent_runner.adapters.claude.get_claude_oauth_token", return_value="tok"):
+                with mock.patch("agent_runner.adapters.claude.urllib.request.urlopen", side_effect=http_err):
+                    windows = adapter.get_usage_windows()
+        finally:
+            http_err.close()
+        self.assertIsNone(windows)
+        self.assertIsNotNone(adapter.last_usage_error)
+        self.assertIn("429", adapter.last_usage_error)
+
+
 class OperationsTests(Base):
     def test_retry_all(self):
         self.init()

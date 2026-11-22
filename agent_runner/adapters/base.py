@@ -73,6 +73,7 @@ QUOTA_RE = re.compile(
 
 
 TERM_GRACE_SEC = 3  # délai laissé au CLI pour écrire son résumé final après SIGTERM, avant SIGKILL
+POST_RESULT_GRACE_SEC = 10  # délai de grâce après réception d'un `result` avant de tuer une sous-tâche orpheline
 
 
 class Adapter:
@@ -93,6 +94,7 @@ class Adapter:
 
     def __init__(self, exclude: list[str] | None = None) -> None:
         self.exclude = list(exclude or [])
+        self.last_usage_error: str | None = None
 
     def get_model_info(self, model: str) -> dict[str, Any] | None:
         """Retourne les métadonnées {'level', 'context', 'cost', 'desc', 'pricing'} pour un modèle ou None."""
@@ -175,6 +177,8 @@ class Adapter:
                 pass
 
         graceful: list[threading.Timer] = []
+        reaped_after_result = False
+        post_result_timer: threading.Timer | None = None
 
         def stop() -> None:
             """SIGTERM puis SIGKILL après un court délai : le CLI peut ainsi émettre son résultat (tokens, coût)."""
@@ -186,6 +190,11 @@ class Adapter:
 
         def on_timeout() -> None:
             state.timed_out = True
+            stop()
+
+        def on_post_result_hang() -> None:
+            nonlocal reaped_after_result
+            reaped_after_result = True
             stop()
 
         timer = threading.Timer(req.timeout_sec, on_timeout)
@@ -201,9 +210,15 @@ class Adapter:
                     if self.on_line(line, state, req) and not state.max_turns_hit:
                         state.max_turns_hit = True
                         stop()
+                    elif state.final_json is not None and post_result_timer is None and not state.max_turns_hit:
+                        post_result_timer = threading.Timer(POST_RESULT_GRACE_SEC, on_post_result_hang)
+                        post_result_timer.daemon = True
+                        post_result_timer.start()
             proc.wait()
         finally:
             timer.cancel()
+            if post_result_timer is not None:
+                post_result_timer.cancel()
             for t in graceful:
                 t.cancel()
             kill()  # ne laisse aucun processus orphelin (également sur Ctrl-C)
@@ -212,6 +227,8 @@ class Adapter:
         state.returncode = proc.returncode
         state.duration_sec = time.monotonic() - start
         self.finalize(state, lines, req)
+        if reaped_after_result and state.has_result and state.returncode is not None and state.returncode < 0:
+            state.returncode = 0
         state.quota_hit = self.detect_quota(state, lines)
         state.error = self._diagnose(state, req)
         payload = state.final_json if state.final_json is not None else {
@@ -240,9 +257,9 @@ class Adapter:
         if state.quota_hit:
             return "quota/limite d'usage du fournisseur atteint (bascule de runner possible)"
         if state.timed_out:
-            return f"timeout après {req.timeout_sec}s"
+            return f"délai de {req.timeout_sec}s dépassé, agent interrompu avant de terminer"
         if state.max_turns_hit:
-            return f"max_turns atteint ({req.max_turns})"
+            return f"plafond de {req.max_turns} tours atteint, agent interrompu avant de terminer"
         if state.returncode != 0:
             return f"code retour {state.returncode} du CLI"
         if self.requires_result and not state.has_result:

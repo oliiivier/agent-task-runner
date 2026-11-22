@@ -129,8 +129,10 @@ class ClaudeAdapter(Adapter):
 
     def get_usage_windows(self) -> list[WindowQuota] | None:
         """Interroge l'endpoint OAuth d'Anthropic pour obtenir les fenêtres 5h et 7j."""
+        self.last_usage_error = None
         token = get_claude_oauth_token()
         if not token:
+            self.last_usage_error = "nécessite un compte OAuth connecté"
             return None
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
@@ -144,7 +146,14 @@ class ClaudeAdapter(Adapter):
         try:
             with urllib.request.urlopen(req, timeout=3.5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        except urllib.error.HTTPError as exc:
+            self.last_usage_error = f"erreur HTTP {exc.code} sur /api/oauth/usage"
+            return None
+        except TimeoutError:
+            self.last_usage_error = "timeout réseau sur /api/oauth/usage"
+            return None
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            self.last_usage_error = f"échec requête /api/oauth/usage ({type(exc).__name__})"
             return None
 
         windows: list[WindowQuota] = []
