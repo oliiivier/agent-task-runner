@@ -130,6 +130,15 @@ class ClaudeAdapter(Adapter):
     def get_usage_windows(self) -> list[WindowQuota] | None:
         """Interroge l'endpoint OAuth d'Anthropic pour obtenir les fenêtres 5h et 7j."""
         self.last_usage_error = None
+        mock = os.environ.get("FAKE_CLAUDE_USAGE")
+        if mock is not None:
+            if not mock:
+                return None
+            try:
+                data = json.loads(mock)
+                return [WindowQuota(**item) for item in data]
+            except Exception:
+                return None
         token = get_claude_oauth_token()
         if not token:
             self.last_usage_error = "nécessite un compte OAuth connecté"

@@ -148,6 +148,8 @@ class Base(unittest.TestCase):
             **{k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")},
             "PATH": f"{bindir}:{os.environ['PATH']}",
             "FAKE_LOG": str(self.fake_log),
+            "FAKE_CLAUDE_USAGE": "",
+            "FAKE_AGY_USAGE": "",
             "XDG_CONFIG_HOME": str(tmp / "xdg"),
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
         }
